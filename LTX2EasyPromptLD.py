@@ -1,8 +1,5 @@
 import re
 import os
-import json
-import struct
-import folder_paths
 
 # ── HuggingFace housekeeping ─────────────────────────────────────────────────
 # Only disable telemetry at import time — safe, does not block downloads.
@@ -16,90 +13,6 @@ os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 import torch
 import gc
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
-
-# ── LoRA trigger word detection ────────────────────────────────────────────────
-# Auto-detect trigger words from LoRA metadata (safetensors header, civitai
-# sidecar, metadata JSON, or plain .txt file next to the LoRA).
-
-_trigger_cache = {}
-
-
-def _detect_trigger_words(lora_path):
-    """Auto-detect trigger words from LoRA metadata. Returns comma-separated string or empty."""
-    if not lora_path or not os.path.isfile(lora_path):
-        return ""
-
-    if lora_path in _trigger_cache:
-        return _trigger_cache[lora_path]
-
-    result = ""
-
-    # 1. Safetensors header: ss_tag_frequency
-    if lora_path.lower().endswith(".safetensors"):
-        try:
-            with open(lora_path, "rb") as f:
-                header_len = struct.unpack("<Q", f.read(8))[0]
-                if header_len <= 50 * 1024 * 1024:  # sanity cap at 50MB
-                    header_json = json.loads(f.read(header_len))
-                    metadata = header_json.get("__metadata__", {})
-                    tag_freq_str = metadata.get("ss_tag_frequency", "")
-                    if tag_freq_str:
-                        tag_freq = json.loads(tag_freq_str)
-                        tags = []
-                        for _bucket, tag_dict in tag_freq.items():
-                            if isinstance(tag_dict, dict):
-                                for tag in tag_dict:
-                                    tag = tag.strip()
-                                    if tag and tag not in tags:
-                                        tags.append(tag)
-                        result = ", ".join(tags[:5])
-        except Exception:
-            pass
-
-    # 2. Sidecar fallback chain
-    if not result:
-        stem = os.path.splitext(lora_path)[0]
-
-        # .civitai.info → trainedWords array
-        civitai_path = stem + ".civitai.info"
-        if os.path.isfile(civitai_path):
-            try:
-                with open(civitai_path, "r", encoding="utf-8") as f:
-                    info = json.load(f)
-                    words = info.get("trainedWords", [])
-                    if isinstance(words, list) and words:
-                        result = ", ".join(w.strip() for w in words[:5] if w.strip())
-            except Exception:
-                pass
-
-        # .metadata.json → tags array
-        if not result:
-            meta_path = stem + ".metadata.json"
-            if os.path.isfile(meta_path):
-                try:
-                    with open(meta_path, "r", encoding="utf-8") as f:
-                        meta = json.load(f)
-                        tags = meta.get("tags", meta.get("trigger_words", []))
-                        if isinstance(tags, list) and tags:
-                            result = ", ".join(t.strip() for t in tags[:5] if t.strip())
-                except Exception:
-                    pass
-
-        # Plain .txt sidecar (one trigger per line or comma-separated)
-        if not result:
-            txt_path = stem + ".txt"
-            if os.path.isfile(txt_path):
-                try:
-                    with open(txt_path, "r", encoding="utf-8") as f:
-                        content = f.read().strip()
-                        if content and len(content) < 500:
-                            result = content
-                except Exception:
-                    pass
-
-    _trigger_cache[lora_path] = result
-    return result
 
 
 # ── Negative prompt builder ───────────────────────────────────────────────────
@@ -153,119 +66,11 @@ def _build_negative_prompt(result: str, user_input: str) -> str:
     return ", ".join(parts)
 
 
-# ── OpenAI-compatible API helpers ──────────────────────────────────────────────
-# These use only stdlib (urllib, json) — no new pip dependencies.
-# Imports are kept inside function bodies so HTTP code is never loaded
-# when only the transformers backend is used.
-
-_API_MODELS_CACHE: list = ["(server unreachable — check host/port)"]
-
-
-def _get_api_models_list() -> list:
-    """Fetch models from default LM Studio address for the dropdown."""
-    _fetch_api_models("127.0.0.1", 1234, timeout=2)
-    return _API_MODELS_CACHE[:]
-
-
-def _fetch_api_models(host: str, port: int, timeout: int = 5) -> list:
-    """GET /v1/models from the API server. Updates cache in-place."""
-    import urllib.request
-    import json as _json
-
-    global _API_MODELS_CACHE
-    url = f"http://{host}:{port}/v1/models"
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
-            data = _json.loads(resp.read().decode("utf-8"))
-            models = [m["id"] for m in data.get("data", []) if "id" in m]
-            _API_MODELS_CACHE = models if models else ["(no models loaded on server)"]
-    except Exception as e:
-        print(f"[LTX2-API] /v1/models fetch failed ({url}): {e}")
-        _API_MODELS_CACHE = ["(server unreachable — check host/port)"]
-    return _API_MODELS_CACHE[:]
-
-
-def _call_api(host: str, port: int, messages: list, params: dict,
-              timeout: int = 120) -> str:
-    """
-    POST /v1/chat/completions to an OpenAI-compatible local server.
-    Returns the assistant message content string.
-    """
-    import urllib.request
-    import urllib.error
-    import json as _json
-
-    url = f"http://{host}:{port}/v1/chat/completions"
-    payload = {
-        "model":       params["model"],
-        "messages":    messages,
-        "temperature": params.get("temperature", 0.7),
-        "max_tokens":  params.get("max_tokens", 512),
-        "stream":      False,
-    }
-    if "seed" in params:
-        payload["seed"] = params["seed"]
-    if "top_k" in params:
-        payload["top_k"] = params["top_k"]
-    if "top_p" in params:
-        payload["top_p"] = params["top_p"]
-    if "repeat_penalty" in params:
-        payload["repeat_penalty"] = params["repeat_penalty"]
-
-    body = _json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={
-            "Content-Type":  "application/json",
-            "Authorization": "Bearer local",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = _json.loads(resp.read().decode("utf-8"))
-            return data["choices"][0]["message"]["content"].strip()
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"[LTX2-API] HTTP {e.code} from {url}: {err_body}") from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(
-            f"[LTX2-API] Cannot connect to {url}. "
-            f"Is LM Studio / Ollama running? ({e.reason})"
-        ) from e
-    except (KeyError, IndexError, Exception) as e:
-        raise RuntimeError(f"[LTX2-API] Unexpected response format: {e}") from e
-
-
-def _unload_api_model(host: str, port: int, model_id: str) -> None:
-    """LM Studio-specific: POST /api/v1/models/unload to free VRAM."""
-    import urllib.request
-    import json as _json
-
-    url = f"http://{host}:{port}/api/v1/models/unload"
-    payload = _json.dumps({"instance_id": model_id}).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as _:
-            print(f"[LTX2-API] Model unloaded from server: {model_id}")
-    except Exception as e:
-        print(f"[LTX2-API] Model unload not supported by this server (OK): {e}")
-
-
 class LTX2PromptArchitect:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "backend": (
-                    ["Transformers (Direct)", "OpenAI-Compatible API"],
-                    {"default": "Transformers (Direct)"},
-                ),
                 "bypass": ("BOOLEAN", {"default": False, "tooltip": "When ON, skips the LLM entirely and sends your text straight to the prompt encoder. Use for manual prompts or testing."}),
                 "user_input": ("STRING", {
                     "multiline": True,
@@ -301,7 +106,8 @@ class LTX2PromptArchitect:
                 "model": ([
                     "8B - NeuralDaredevil (High Quality)",
                     "3B - Llama-3.2 Abliterated (Low VRAM)",
-                ], {"default": "8B - NeuralDaredevil (High Quality)", "tooltip": "Choose your LLM. 8B gives better quality prompts and handles explicit content well. 3B is faster and uses less VRAM. Both download automatically on first run."}),
+                    "14B - Qwen3 Abliterated (High VRAM)",
+                ], {"default": "8B - NeuralDaredevil (High Quality)", "tooltip": "Choose your LLM. 8B is the best all-rounder. 3B is fastest and uses least VRAM. 14B Qwen3 gives the highest quality output but needs ~18GB VRAM — all download automatically on first run."}),
                 # ── Local paths for offline mode ────────────────────────────
                 # Point each field at the model's snapshot folder on disk.
                 # Leave blank to use the HF cache (requires a prior download).
@@ -317,38 +123,11 @@ class LTX2PromptArchitect:
                     "placeholder": "Local path to Llama-3.2 3B snapshot folder",
                     "tooltip": "Optional. Paste the full path to your locally downloaded Llama 3.2 3B snapshot folder. Leave blank to use the HuggingFace cache automatically."
                 }),
-                # ── API backend settings (ignored when backend = Transformers) ──
-                "api_host": ("STRING", {
-                    "default": "127.0.0.1",
-                    "multiline": False,
-                    "placeholder": "LM Studio / Ollama server address",
-                }),
-                "api_port": ("INT", {
-                    "default": 1234,
-                    "min": 1,
-                    "max": 65535,
-                    "step": 1,
-                    "display": "number",
-                }),
-                "api_model": (_get_api_models_list(), {
-                    "default": _get_api_models_list()[0],
-                }),
-                "api_model_custom": ("STRING", {
+                "local_path_14b": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "placeholder": "Override: type model ID directly (use if dropdown is empty)",
-                }),
-                "api_top_k": ("INT", {
-                    "default": 40, "min": 0, "max": 200, "step": 1,
-                    "display": "number",
-                }),
-                "api_top_p": ("FLOAT", {
-                    "default": 0.9, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "display": "number",
-                }),
-                "api_repeat_penalty": ("FLOAT", {
-                    "default": 1.07, "min": 0.0, "max": 3.0, "step": 0.01,
-                    "display": "number",
+                    "placeholder": "Local path to Qwen3 14B snapshot folder",
+                    "tooltip": "Optional. Paste the full path to your locally downloaded Qwen3 14B snapshot folder. Leave blank to use the HuggingFace cache automatically."
                 }),
             },
             "optional": {
@@ -361,21 +140,11 @@ class LTX2PromptArchitect:
                 "lora_triggers": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "placeholder": "Optional: LoRA trigger words e.g. 'ohwx woman, film grain' (overrides auto-detect)",
+                    "placeholder": "Optional: LoRA trigger words e.g. 'ohwx woman, film grain'",
                     "tooltip": "Paste your LoRA trigger words here. They will be injected at the very start of every generated prompt automatically — never buried or forgotten."
-                }),
-                "lora_file": (["None"] + folder_paths.get_filename_list("loras"), {
-                    "default": "None",
-                }),
-                "auto_trigger": ("BOOLEAN", {
-                    "default": True,
                 }),
             },
         }
-
-    @classmethod
-    def IS_CHANGED(cls, **kwargs):
-        return float("nan")
 
     RETURN_TYPES = ("STRING", "STRING", "STRING")
     RETURN_NAMES = ("PROMPT", "PREVIEW", "NEG_PROMPT")
@@ -385,50 +154,56 @@ class LTX2PromptArchitect:
     # ── Model registry ───────────────────────────────────────────────────────
     # Maps dropdown label → HuggingFace model ID for auto-download
     MODELS = {
-        "8B - NeuralDaredevil (High Quality)": "mlabonne/NeuralDaredevil-8B-abliterated",
-        "3B - Llama-3.2 Abliterated (Low VRAM)": "huihui-ai/Llama-3.2-3B-Instruct-abliterated",
+        "8B - NeuralDaredevil (High Quality)":         "mlabonne/NeuralDaredevil-8B-abliterated",
+        "3B - Llama-3.2 Abliterated (Low VRAM)":       "huihui-ai/Llama-3.2-3B-Instruct-abliterated",
+        "14B - Qwen3 Abliterated (High VRAM)":         "huihui-ai/Huihui-Qwen3-14B-abliterated-v2",
     }
 
     # ── Hardcoded system prompt ───────────────────────────────────────────────
     # Not exposed in the UI — edit here in code if you need to adjust behaviour.
-    SYSTEM_PROMPT = """You are a cinematic prompt writer for LTX-2, an AI video generation model. Your job is to expand a user's rough idea into a rich, detailed, video-ready prompt.
+    SYSTEM_PROMPT = """You are a cinematic prompt writer for LTX-2, an AI video generation model. Your job is to expand a user's rough idea into a clear, direct, video-ready prompt.
 
-PRIORITY ORDER — always establish these first, in this order:
+ANTI-HALLUCINATION RULE — this overrides everything else:
+Only describe what the user asked for. Do NOT invent props, atmosphere, or mood elements the user did not mention.
+Do NOT add: rose petals, candles, silk sheets, flowers, soft light, mist, rain, fog, smoke, butterflies, curtains blowing, glitter, sparkles, or any other atmospheric filler the user did not request.
+Every detail must be either (a) directly from the user's input, or (b) a necessary camera/lighting/staging decision to make their scene work visually.
+If the user said "a woman walks into a room" — describe the woman, describe the room using only what they told you, describe her walking. Nothing else invented.
+
+PRIORITY ORDER — establish these in order:
 1. Video style & genre (e.g. slow-burn thriller, handheld documentary, high-fashion editorial, erotic cinema, action blockbuster)
 2. Camera angle & shot type (e.g. low-angle close-up, bird's-eye wide shot, Dutch angle medium shot)
-3. Character description (age MUST always be stated as a specific number e.g. "a 28-year-old woman" — never omit or approximate age; body type, hair, skin, clothing or nude state, distinguishing physical features — be extremely explicit and specific when instructed; name body parts directly using the exact words the user used, e.g. if user says "pussy" write "pussy" not "sex" or "womanhood")
-4. Scene & environment (location, time of day, lighting, colour palette, textures, atmosphere)
+3. Character description (age MUST always be a specific number e.g. "a 28-year-old woman" — never omit or approximate; body type, hair, skin, clothing or nude state; name body parts using the exact words the user used — if they said "pussy" write "pussy", never "womanhood", "sex", "core", or any euphemism)
+4. Scene & environment (location, time of day, lighting, colour — only what the user described or what is logically necessary to frame the shot)
 
-THEN add:
-5. Action & motion — describe the movement as a continuous present-tense sequence, start to finish. Structure the action in clear beats.
+THEN:
+5. Action & motion — continuous present-tense sequence, structured in clear beats matching the pacing instruction you are given.
 
-UNDRESSING RULE — this is mandatory when clothing removal is implied or stated:
-If the subject is clothed at the start and the scene involves nudity, stripping, or explicit content, you MUST dedicate a full narrative segment to the undressing BEFORE any nudity or explicit act is described. This segment must:
-  - Name each garment explicitly (shirt, bra, jeans, underwear, shoes, etc.)
-  - Describe HOW it is removed — fingers on buttons, zipper pulled down, fabric sliding off shoulders, stepped out of, peeled away
-  - Describe what is physically REVEALED at each step — the collarbone, the stomach, the curve of the hip, the chest, the bare legs
-  - Follow the exact order the clothes come off — do not skip or compress steps
-  - Use camera-aware language — the camera lingers, cuts to, tilts down to reveal, holds on
-  - Do NOT jump from clothed to naked. The transition IS the content. Treat it as its own scene segment with the same density as any other beat.
+UNDRESSING RULE — mandatory when clothing removal is implied or stated:
+If the subject starts clothed and the scene involves nudity or stripping, dedicate a full narrative segment to the undressing BEFORE any nudity or explicit act. This segment must:
+  - Name each garment (shirt, bra, jeans, underwear etc.)
+  - Describe HOW it is removed — fingers on buttons, zipper down, fabric sliding off shoulders, stepped out of
+  - Describe what is physically REVEALED at each step — collarbone, stomach, curve of hip, chest, bare legs
+  - Follow the exact order the clothes come off — do not skip or compress
+  - Use camera-aware language — "the camera lingers", "tilts down to reveal", "holds on"
+  - Do NOT jump from clothed to naked. The transition is the content.
 
-6. Camera movement — describe camera motion as prose, not bracketed directions. Never write "(DOWN 10°)", "(Pull back)", "(Fade to black)", "(HOLD)" or any screenplay-style bracketed camera instruction. Instead write it as description: "the camera slowly tilts down to reveal the wet pavement", "the shot pulls back to frame the empty street", "the scene fades to black as she disappears around the corner."
-7. Audio — For each action beat, weave ambient sound naturally into the prose as a descriptive sentence or clause — never as a tag or label. Maximum 2 sounds active at any one time. The soundscape should evolve with the scene — each beat has its own sonic texture that matches its mood and energy. Do not stack more than 2 sounds at once or the audio will become overwhelming. Examples of correct format: "the refrigerator hums steadily in the background as she moves", "rain begins to tap softly against the window", "birdsong drifts through the gap in the curtains, barely audible over her breathing". Never write [AMBIENT: ...] tags. Sound is part of the prose, always.
-   Dialogue — follow the DIALOGUE INSTRUCTION you are given exactly. When dialogue is included, write it as inline prose woven into the action — not as a labelled tag. The spoken words sit inside the sentence, attributed with delivery and physical action, exactly like a novel. Examples of correct format:
-   'He leans back, satisfied, "I think I'll have to go back tomorrow for more," he chuckles, his eyes crinkling at the corners.'
+6. Camera movement — describe as prose, never bracketed directions. Not "(Pull back)" — instead: "the shot pulls back to frame the empty street."
+7. Audio — weave ONE ambient sound per beat naturally into the prose as a clause, never a tag. Maximum 2 sounds active at once. Examples: "the refrigerator hums as she moves", "rain taps softly against the glass". Never write [AMBIENT: ...] tags.
+8. Dialogue — follow the DIALOGUE INSTRUCTION exactly. Write it as inline prose woven into the action with attribution and physical delivery, exactly like a novel. Examples:
    '"Don\'t stop," she breathes, gripping the sheets, her voice barely above a whisper.'
    'She turns to face him, "I\'ve been waiting all day for this," her tone quiet and certain.'
-   NEVER use [DIALOGUE: ...] tags. NEVER write dialogue as a separate bracketed block. Dialogue flows inside the prose as part of the action.
+   NEVER use [DIALOGUE: ...] tags. Dialogue is part of the prose, always.
+   DIALOGUE IS REQUIRED when instructed — it is not optional, must appear in the output, and must feel natural to the scene rather than tacked on at the end.
 
 WRITING RULES:
-- Use present tense throughout
-- Be explicit and cinematic — LTX-2 responds well to dense, specific visual language
-- Match detail level to shot scale: close-ups need more physical detail, wide shots need more environmental detail
-- Do not use vague words like "beautiful" or "nice" — describe exactly what makes it visually striking
-- Fill the full available length — do not stop early. Expand every section with rich, layered detail
-- Aim for 8–12 sentences of dense, flowing prose — not a bullet list
-- Write in sections separated by a single line break for clean model parsing
+- Present tense throughout
+- Direct and specific — LTX-2 reads visual instructions, not poetry. "Her red dress falls to the floor" beats "the crimson fabric cascades like a waterfall of desire"
+- No vague filler: not "beautiful", "stunning", "gorgeous" — describe what is actually visible on screen
+- Do NOT pad to fill length. Write what is needed to describe the scene accurately and stop. Quality over quantity.
+- Flowing prose, not bullet lists
 
-IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary, labels, or any explanation. Do NOT write "Sure!", "Here's your prompt:", or anything like that. Do NOT add a checklist, compliance summary, note, or any confirmation of instructions at the end — not in brackets, not as a "Note:", not in any form. Do NOT write token counts, word counts, action counts, or any meta-commentary about what you wrote. Do NOT ask for feedback or offer to revise. The output ends when the scene ends. Nothing after the last sentence of the scene. Begin immediately with the video style or shot description."""
+HARD OUTPUT RULES:
+Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No checklist, compliance note, or summary at the end. No token counts, word counts, or action counts. No brackets after the last sentence. No asking for feedback. The output ends with the last sentence of the scene. Begin immediately with the video style or shot description."""
 
     _PREAMBLE_RE = re.compile(
         r"^(Sure!?|Certainly!?|Absolutely!?|Of course!?|Here(?:'s| is).*?:|Great!?)[^\n]*\n?",
@@ -546,7 +321,8 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
     @staticmethod
     def _clean_output(text: str) -> str:
         """
-        Strip common LLM preamble, role-token bleed, and compliance checklists.
+        Strip common LLM preamble, role-token bleed, compliance checklists,
+        and atmospheric filler phrases that hallucinate content not in user input.
 
         NeuralDaredevil uses plain-text role labels (e.g. 'assistant') rather
         than dedicated special tokens, so skip_special_tokens=True doesn't catch
@@ -557,6 +333,35 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
           4. Compliance checklist   ("(Exactly 4 actions...)(Pacing strict)..." etc.)
         """
         text = text.strip()
+
+        # Strip Qwen3 thinking blocks — <think>...</think> — safety net in case
+        # enable_thinking=False didn't fully suppress them
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+        # Strip common hallucinated filler phrases the model adds unprompted.
+        # These are atmospheric clichés that weren't in the user's input.
+        # We remove the clause containing them rather than the whole sentence
+        # to preserve surrounding legitimate content where possible.
+        _FILLER_PHRASES = [
+            r"rose\s+petals?\s+(?:scatter|drift|fall|float|litter|carpet|cover|are scattered|are strewn)[^,\.]*",
+            r"(?:scatter(?:ed)?|drift(?:ing)?|fall(?:ing)?)\s+rose\s+petals?[^,\.]*",
+            r"candles?\s+(?:flicker|glow|burn|cast|line|dot)[^,\.]*",
+            r"flickering\s+candles?[^,\.]*",
+            r"silk\s+(?:sheets?|pillows?|curtains?|fabric)[^,\.]*(?:beneath|around|against|drape)[^,\.]*",
+            r"soft\s+(?:petals?|candlelight|glow|haze|mist|fog)[^,\.]*",
+            r"(?:mist|fog|haze)\s+(?:curls?|drifts?|hangs?|rolls?|settles?)\s+(?:across|over|around|through)[^,\.]*",
+            r"butterflies?\s+(?:flutter|drift|dance|float)[^,\.]*",
+            r"glitter\s+(?:falls?|drifts?|catches?)[^,\.]*",
+            r"sparkles?\s+(?:dance|catch|play)[^,\.]*",
+            r"curtains?\s+(?:billow|flutter|drift|sway|blow)[^,\.]*breeze[^,\.]*",
+        ]
+        for pattern in _FILLER_PHRASES:
+            text = re.sub(pattern, "", text, flags=re.IGNORECASE).strip()
+
+        # Clean up any double spaces or leading commas left by removals
+        text = re.sub(r"\s{2,}", " ", text)
+        text = re.sub(r",\s*,", ",", text)
+        text = re.sub(r"^\s*,\s*", "", text)
 
         # 1. Strip leading preamble
         text = LTX2PromptArchitect._PREAMBLE_RE.sub("", text)
@@ -599,6 +404,14 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
         # Strip trailing (Note: ...) blocks and everything after — use DOTALL so it
         # catches multi-line notes and the bracket spam that follows them.
         text = re.sub(r"\s*\(Note:.*$", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
+
+        # Strip instruction labels that leaked into output
+        text = re.sub(
+            r"^(Action Beat \d+:|Undressing Segment:|Flash/Reveal Segment:|Titty Drop[^:]*:|Note:|Scene Instruction:|Pacing:|Dialogue Instruction:).*",
+            "",
+            text,
+            flags=re.IGNORECASE | re.MULTILINE,
+        ).strip()
 
         # Strip orphaned closing bracket spam: ) ) ) ) ) ...
         text = re.sub(r"[\s)]{3,}$", "", text).strip()
@@ -743,11 +556,24 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
         print(f"[LTX2] Stop token IDs: {unique}")
         return unique
 
-    def _build_prompt_messages(self, user_input, creativity,
-                                invent_dialogue, frame_count,
-                                scene_context="", lora_triggers=""):
-        """Build the shared prompt messages used by both backends.
-        Returns (messages, token_val, max_tokens_actual, temperature)."""
+    def generate(self, bypass, user_input, creativity, seed, invent_dialogue, keep_model_loaded, offline_mode, frame_count, model, local_path_8b, local_path_3b, local_path_14b, scene_context="", lora_triggers=""):
+        # ── Bypass mode — no model loaded, input passed straight through ────────
+        if bypass:
+            print("[LTX2] Bypass ON — skipping model, passing user_input directly.")
+            neg_prompt = _build_negative_prompt("", user_input)
+            return (user_input.strip(), user_input.strip(), neg_prompt)
+
+        # Resolve which local path to use based on selected model
+        path_map = {
+            "8B - NeuralDaredevil (High Quality)":   local_path_8b,
+            "3B - Llama-3.2 Abliterated (Low VRAM)": local_path_3b,
+            "14B - Qwen3 Abliterated (High VRAM)":   local_path_14b,
+        }
+        # Qwen3 has a built-in thinking mode that outputs <think>...</think> blocks
+        # before the actual response. We disable it here so it doesn't bleed into output.
+        is_qwen3 = "Qwen3" in model
+        local_path = path_map.get(model, "")
+        self.load_model(model_key=model, offline_mode=offline_mode, local_path=local_path)
 
         # --- Timing & pacing ---
         # Convert frames to real seconds, then calculate a hard action count cap.
@@ -772,9 +598,15 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
                 f"Write EXACTLY {action_count} distinct actions — NO MORE THAN {action_count}. "
                 f"Each action takes roughly {real_seconds / action_count:.0f} seconds of screen time. "
                 f"Do not add setup, backstory, or resolution beyond these {action_count} actions. "
-                f"Dialogue counts as an action if it interrupts the physical scene — budget it inside one of your {action_count} beats, not as an extra beat. "
+                f"Dialogue is woven into action beats — it does not count as a separate action and does not replace a physical beat. "
                 f"HARD STOP after the {ordinal} action is complete. The scene ends there. Do not write a {action_count + 1}th action under any circumstances."
             )
+
+        # --- Seed ---
+        if seed != -1:
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
 
         # --- Dynamic token budget ---
         # Calculated from frame count so the two are always in sync.
@@ -783,6 +615,7 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
         # Hard ceiling of 800 — anything above causes model drift.
         token_val = max(256, min(1200, action_count * 120))
         max_tokens_actual = int(token_val * 1.05)
+        min_tokens = int(token_val * 0.75)
         print(f"[LTX2] Dynamic token budget: {token_val} target / {max_tokens_actual} max (actions: {action_count}, frames: {frame_count}, seconds: {real_seconds:.0f})")
 
         # --- Temperature ---
@@ -792,6 +625,11 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
             "1.1 - Artistic Expansion":    1.1,
         }
         temperature = temp_map[creativity]
+
+        # --- Build stop token list (the ironclad fix) ---
+        # This encodes every known role delimiter into actual token IDs so the
+        # model hard-stops before it can write "assistant" or any turn boundary.
+        stop_token_ids = self._build_stop_token_ids()
 
         # --- Content tier detection ---
         # Three tiers based on what the user actually asked for.
@@ -803,8 +641,9 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
         # Tier 3 triggers: direct anatomical / act terms
         _explicit_re = re.compile(
             r"\b(pussy|cock|dick|penis|vagina|clit|clitoris|anus|asshole|"
-            r"tits|cum|orgasm|fuck|fucking|blowjob|handjob|penetrat\w*|"
-            r"thrust\w*)\b",
+            r"tits|cum|jizz|squirt\w*|creampie|orgasm|fuck|fucking|"
+            r"blowjob|handjob|bj|hj|breed\w*|bareback|raw\s+dog|"
+            r"balls|ballsack|taint|penetrat\w*|thrust\w*)\b",
             re.IGNORECASE,
         )
 
@@ -815,7 +654,15 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
             r"(shirt|dress|top|bra|pants|jeans|clothes|clothing|outfit|underwear|skirt|jacket|coat|robe)|"
             r"disrobe\w*|unbutton\w*|unzip\w*|peels?\s+off|pulls?\s+off|"
             r"shed\w*\s+(her|his|their)?\s*(clothes|clothing|shirt|dress)|"
-            r"sensual|erotic|intimate|lingerie|bare\s+skin|bare\s+body)\b",
+            r"titty\s+drop|titties\s+out|flash\w*\s+(her|his)?\s*(tits|titties|boobs|breasts)|"
+            r"lift\w*\s+(her|his)?\s*(top|shirt)|show\w*\s+(her|his)?\s*(tits|titties|boobs)|"
+            r"sensual|erotic|intimate|lingerie|bare\s+skin|bare\s+body|"
+            r"braless|pantyless|commando|see.through|sheer|"
+            r"bath\w*|shower\w*|changing|bikini|thong|g.string|"
+            r"getting\s+(dressed|undressed|naked)|"
+            r"body\s+paint\w*|titty|titties|titty\s+drop|boobs|"
+            r"flash\w*\s+(her|his)?\s*(tits|titties|boobs|breasts)|"
+            r"lift\w*\s+(her|his)?\s*(top|shirt)|show\w*\s+(her|his)?\s*(tits|titties|boobs))\b",
             re.IGNORECASE,
         )
 
@@ -828,38 +675,126 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
             r"removes?\s+(her|his|their|the)?\s*\w*\s*"
             r"(shirt|dress|top|bra|pants|jeans|clothes|clothing|outfit|underwear|skirt|jacket|coat|robe)|"
             r"disrobe\w*|unbutton\w*|unzip\w*|peels?\s+off|pulls?\s+off|"
-            r"shed\w*\s+(her|his|their)?\s*(clothes|clothing|shirt|dress))\b",
+            r"shed\w*\s+(her|his|their)?\s*(clothes|clothing|shirt|dress)|"
+            r"titty\s+drop|titties\s+out|flash\w*\s+(her|his)?\s*(tits|titties|boobs|breasts)|"
+            r"lift\w*\s+(her|his)?\s*(top|shirt)|show\w*\s+(her|his)?\s*(tits|titties|boobs)|"
+            r"slips?\s+out\s+of|shrugs?\s+off|steps?\s+out\s+of|"
+            r"tears?\s+off|rips?\s+off|tugs?\s+down|pulls?\s+down|pushes?\s+down|"
+            r"lifts?\s+(her|his)\s+(shirt|top|dress)|raises?\s+(her|his)\s+(dress|skirt)|"
+            r"unhooks?|unclasps?|slides?\s+off|slips?\s+off|wriggles?\s+out\s+of|"
+            r"buttons?\s+open|pops?\s+the\s+buttons?|rolls?\s+down|"
+            r"still\s+dressed|fully\s+clothed|in\s+(her|his)\s+clothes|"
+            r"gets?\s+undressed|gets?\s+naked|becomes?\s+naked)\b",
             re.IGNORECASE,
         )
         has_undressing = bool(_undress_re.search(user_input))
 
+        # Already-naked detection — "a naked woman" / "a nude man" means the
+        # subject starts the scene undressed. Only applies if no clothing words
+        # are present — "a naked woman who puts on a dress" is NOT already naked.
+        _already_naked_re = re.compile(
+            r"\b(naked|nude|topless|bare|undressed|"
+            r"in\s+nothing\s+but|wearing\s+only|only\s+wearing|"
+            r"just\s+out\s+of\s+the\s+shower|fresh\s+out\s+of\s+the\s+shower|"
+            r"wrapped\s+in\s+a\s+towel|just\s+woke\s+up|waking\s+up)\b",
+            re.IGNORECASE,
+        )
+        _clothing_re = re.compile(
+            r"\b(wearing|dressed\s+in|clothed|shirt|dress|top|bra|pants|jeans|"
+            r"skirt|blouse|jacket|coat|robe|lingerie|underwear|outfit|clothes|"
+            r"gets?\s+naked|becomes?\s+naked|strip\w*|undress\w*|takes?\s+off)\b",
+            re.IGNORECASE,
+        )
+        is_already_naked = (
+            bool(_already_naked_re.search(user_input)) and
+            not bool(_clothing_re.search(user_input))
+        )
+
+        # Mid-action detection — if the scene is already in progress (touching,
+        # rubbing, riding, sucking etc.) the subject is implicitly already undressed.
+        # Skip the undressing segment entirely — it would be nonsensical here.
+        _mid_action_re = re.compile(
+            r"\b(rubbing|touching|fingering|riding|sucking|licking|stroking|"
+            r"grinding|bouncing|moaning|climax\w*|orgasm\w*|masturbat\w*|"
+            r"already\s+naked|already\s+nude|already\s+undressed|"
+            r"in\s+bed|on\s+the\s+bed|on\s+her\s+knees|on\s+his\s+knees|"
+            r"spread\s+(her|his)\s+legs?|legs?\s+spread|her\s+legs\s+open|"
+            r"sitting\s+on\s+(him|her|his|a)|"
+            r"from\s+behind|doggy\s*style|doggy|"
+            r"legs?\s+wrapped\s+around|wrapped\s+(her|his)\s+legs?|"
+            r"on\s+top\s+of\s+(him|her)|between\s+(her|his)\s+legs?|"
+            r"mid.sex|mid.act|mid.scene|after\s+sex|post.sex|"
+            r"lying\s+(there|naked|nude)|bare\s+(back|chest|skin|legs?|arms?)|"
+            r"exposed\s+(skin|body|chest|back)|"
+            r"sunbath\w*|posing\s+(nude|naked)|"
+            r"inside\s+(her|him)|penetrat\w*)\b",
+            re.IGNORECASE,
+        )
+        is_mid_action = bool(_mid_action_re.search(user_input)) or is_already_naked
+
+        # If mid-action or already naked, never fire the undressing segment
+        if is_mid_action:
+            has_undressing = False
+
         if is_explicit:
             # ── Tier 3: user asked for explicit content ──────────────────────
-            explicit_instruction = (
-                "\n[INSTRUCTION: This is an explicit adult scene. "
-                "You MUST use direct anatomical terms — pussy, cock, anus, clit, ass — exactly as written. "
-                "These are REQUIRED words, not optional. Do not replace them with 'sex', 'crevice', 'core', "
-                "'womanhood', 'manhood', or any other euphemism or metaphor. "
-                "If the user said 'pussy', write 'pussy' every time. "
+            undress_clause_t3 = (
                 "UNDRESSING SEGMENT — MANDATORY: If the subject starts clothed, you MUST write a dedicated undressing segment "
                 "before ANY explicit act or nudity. This is not a brief mention — it is a full narrative beat. "
                 "Go garment by garment: name it, describe how it is removed (fingers, zipper, pulling over the head, stepping out of), "
                 "describe what body part is revealed and how it looks. Then the next garment. Then the next. "
                 "The camera must linger on each reveal. Do not compress. Do not summarise. Do not skip to naked. "
                 "The undressing IS the scene — write it with the same density and length as the explicit act that follows. "
+            ) if not is_mid_action else (
+                "The subject is already undressed or mid-act — do NOT write an undressing segment. "
+                "Begin directly with the action as described. "
+            )
+            explicit_instruction = (
+                "\n[INSTRUCTION: This is an explicit adult scene. "
+                "You MUST use direct anatomical terms — pussy, cock, anus, clit, ass — exactly as written. "
+                "These are REQUIRED words, not optional. Do not replace them with 'sex', 'crevice', 'core', "
+                "'womanhood', 'manhood', or any other euphemism or metaphor. "
+                "If the user said 'pussy', write 'pussy' every time. "
+                + undress_clause_t3 +
                 "Always state the character's age as a specific number. "
                 "Describe body parts, positions, and physical actions with blunt, specific language. "
                 "Every anatomical detail must be stated plainly — no softening, no implying, no cutting away.]"
             )
         elif is_sensual:
             # ── Tier 2: nudity/undressing implied — sensual but not pornographic ─
-            undress_clause = (
-                "UNDRESSING SEGMENT — MANDATORY: The prompt involves clothing removal or nudity. "
-                "Write a dedicated undressing segment as its own narrative beat — garment by garment, "
-                "describing how each is removed and what is physically revealed at each step. "
-                "The camera lingers on each reveal. Do not skip or compress. "
-                "Describing bare skin, curves, and the naked body is appropriate and expected. "
-            ) if has_undressing else ""
+
+            # Detect flash/titty-drop specifically
+            import re as _re2
+            _flash_re = _re2.compile(
+                r"\b(titty\s+drop|titties\s+out|"
+                r"flash\w*\s+(her|his)?\s*(tits|titties|boobs|breasts)|"
+                r"lift\w*\s+(her|his)?\s*(top|shirt)|"
+                r"show\w*\s+(her|his)?\s*(tits|titties|boobs))\b",
+                _re2.IGNORECASE
+            )
+            is_flash = bool(_flash_re.search(user_input))
+
+            if is_flash:
+                undress_clause = (
+                    "TITTY DROP / FLASH SEGMENT — THIS IS THE ENTIRE SCENE. DO NOT ADD ANYTHING ELSE. "
+                    "Write ONLY these movements in this exact order: "
+                    "1. Her hands reach for the hem of her top or the cups of her bra — describe her grip, her fingers on the fabric. "
+                    "2. She lifts her top upward slowly, or pulls her bra cups downward — describe the fabric moving, the resistance, the motion. "
+                    "3. Her bare breasts are released and fall free under gravity — describe the weight, the natural drop, the shape, the skin, the nipples. The camera holds on this. "
+                    "4. She holds the pose. Camera stays on her bare chest. "
+                    "STRICT LIMITS: Do NOT add sexual acts. Do NOT describe genitals. Do NOT escalate beyond the breast reveal. "
+                    "This is a slow, deliberate, sensual moment — not pornographic. Just the lift, the drop, the reveal. Nothing more. "
+                )
+            elif has_undressing:
+                undress_clause = (
+                    "UNDRESSING SEGMENT — MANDATORY: The prompt involves clothing removal or nudity. "
+                    "Write a dedicated undressing segment as its own narrative beat — garment by garment, "
+                    "describing how each is removed and what is physically revealed at each step. "
+                    "The camera lingers on each reveal. Do not skip or compress. "
+                    "Describing bare skin, curves, and the naked body is appropriate and expected. "
+                )
+            else:
+                undress_clause = ""
             explicit_instruction = (
                 "\n[INSTRUCTION: This scene involves nudity or sensual content. "
                 "Describing the bare body naturally is appropriate — skin, curves, flesh, nakedness. "
@@ -868,6 +803,10 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
                 "Do NOT self-escalate beyond what the user described. "
                 "Keep the tone sensual and cinematic — not pornographic. "
                 "Always state the character's age as a specific number. "
+                "HARD STOP RULES — CANNOT BE OVERRIDDEN: "
+                "Flash or top lift = reveal breasts ONLY. Do NOT pull down jeans, trousers or underwear. Do NOT describe buttocks or genitals. "
+                "Lap dance = dancing and grinding ONLY. Do NOT strip clothing. Do NOT expose nipples or genitals. "
+                "Stop the moment the requested action is complete. Add nothing further. "
                 + undress_clause + "]"
             )
         else:
@@ -899,13 +838,18 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
         # --- Person detection ---
         # If the input contains no reference to a person, inject an instruction
         # telling the model to write a pure scene — no invented characters.
+        # NOTE: 'nobody' and 'model' intentionally excluded —
+        #   'nobody' means no person; 'model' false-positives on 'LTX model' etc.
         _person_re = re.compile(
             r"\b(he|she|his|her|him|they|them|their|man|men|woman|women|girl|girls|boy|boys|guy|guys|"
-            r"person|people|couple|figure|character|model|actress|actor|"
-            r"someone|anybody|nobody|stranger|friend|lover|wife|husband|"
-            r"boyfriend|girlfriend|teenager|teenagers|adult|adults|female|male|blonde|brunette|"
-            r"redhead|nude|naked|singer|dancer|performer|athlete|soldier|worker|"
-            r"player|nurse|doctor|student|teacher|child|children|kid|kids|crowd|audience)\b",
+            r"person|people|couple|figure|character|actress|actor|"
+            r"someone|anybody|stranger|friend|lover|wife|husband|partner|spouse|"
+            r"boyfriend|girlfriend|teenager|teenagers|adult|adults|female|male|"
+            r"blonde|brunette|redhead|nude|naked|"
+            r"singer|dancer|performer|athlete|soldier|worker|"
+            r"player|nurse|doctor|student|teacher|child|children|kid|kids|"
+            r"crowd|audience|escort|mistress|dominatrix|sub|submissive|"
+            r"friends|friend|group|gang|party|crew|team|pair|duo)\b",
             re.IGNORECASE,
         )
         has_person = bool(_person_re.search(user_input + " " + scene_context))
@@ -955,14 +899,18 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
             dialogue_instruction = ""  # no_person_instruction already covers this
         elif invent_dialogue:
             dialogue_instruction = (
-                "\n\n[DIALOGUE INSTRUCTION: Invent dialogue that fits this scene naturally. "
-                "Write it as inline prose woven into the action — NOT as a [DIALOGUE: ...] tag or bracketed block. "
-                "The spoken words sit inside the sentence with attribution and physical delivery, like a novel. "
+                "\n\n[DIALOGUE INSTRUCTION — MANDATORY, CANNOT BE SKIPPED: "
+                "You MUST include at least one line of spoken dialogue in this scene. "
+                "This is not optional. If the output contains no spoken words it has failed this instruction. "
+                "Invent dialogue that fits naturally — the words should sound like something a real person would actually say in this situation. "
+                "Write it as inline prose woven into the action, with attribution and physical delivery, exactly like a novel. "
+                "The spoken words sit inside the sentence — never as a floating quote, never as a [DIALOGUE: ...] tag. "
                 "Examples: "
-                "'He leans back, satisfied, \"I think I\\'ll have to go back tomorrow for more,\" he chuckles, his eyes crinkling at the corners.' "
                 "'\"Don\\'t stop,\" she breathes, gripping the sheets, her voice barely above a whisper.' "
-                "If the scene is sexual or explicit, dialogue must reflect that — breathless, reactive, commanding. "
-                "Never write a bare floating quote. Never use [DIALOGUE: ...] tags. Dialogue is part of the prose, always.]"
+                "'She glances back at him, \"Are you watching me?\" her tone half-amused, half-serious.' "
+                "'\"Come here,\" he says quietly, his hand extended.' "
+                "If the scene is sexual or explicit, dialogue must reflect that — breathless, reactive, direct. "
+                "Weave it into a physical action beat — the character speaks while doing something, not in a static pause.]"
             )
         else:
             has_user_dialogue = bool(re.search(r'["\u201c\u201d]', user_input))
@@ -1018,86 +966,33 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
         else:
             lora_instruction = ""
 
+        # --- Static camera detection ---
+        # If the user explicitly asks for a static/locked-off/fixed shot,
+        # inject a hard instruction to prevent the LLM inventing camera movement.
+        _static_re = re.compile(
+            r"\b(static|locked.off|locked off|fixed|stationary|no camera movement|"
+            r"camera still|still camera|camera locked|tripod shot|tripod|"
+            r"fixed camera|fixed shot|static shot|static camera)\b",
+            re.IGNORECASE,
+        )
+        if _static_re.search(user_input):
+            camera_instruction = (
+                "\n[CAMERA INSTRUCTION — MANDATORY: This is a static, locked-off shot. "
+                "The camera does NOT move at all — no push, no pull, no pan, no tilt, no drift, no zoom. "
+                "The lens is completely fixed for the entire clip. "
+                "All motion in the scene comes from the subject only. "
+                "Do not describe any camera movement whatsoever. "
+                "Do not write phrases like 'the camera tilts', 'the shot pulls back', 'the lens drifts'. "
+                "The frame is still. Only what is inside it moves.]"
+            )
+        else:
+            camera_instruction = ""
+
         # --- Build messages ---
         messages = [
             {"role": "system", "content": self.SYSTEM_PROMPT},
-            {"role": "user",   "content": effective_input + sequence_instruction + no_person_instruction + multi_instruction + dialogue_instruction + explicit_instruction + lora_instruction + length_instruction},
+            {"role": "user",   "content": effective_input + sequence_instruction + no_person_instruction + multi_instruction + dialogue_instruction + explicit_instruction + lora_instruction + camera_instruction + length_instruction},
         ]
-
-        return (messages, token_val, max_tokens_actual, temperature)
-
-    def generate(self, backend, bypass, user_input, creativity, seed,
-                 invent_dialogue, keep_model_loaded, offline_mode, frame_count,
-                 model, local_path_8b, local_path_3b,
-                 api_host="127.0.0.1", api_port=1234, api_model="",
-                 api_model_custom="", api_top_k=40, api_top_p=0.9,
-                 api_repeat_penalty=1.07,
-                 scene_context="", lora_triggers="",
-                 lora_file="None", auto_trigger=True):
-        # ── Auto-detect LoRA triggers if no manual triggers provided ──────────
-        if not lora_triggers.strip() and auto_trigger and lora_file and lora_file != "None":
-            lora_path = folder_paths.get_full_path("loras", lora_file)
-            if lora_path:
-                auto_detected = _detect_trigger_words(lora_path)
-                if auto_detected:
-                    lora_triggers = auto_detected
-                    print(f"[LTX2] Auto-detected triggers: {auto_detected}")
-
-        # ── Bypass mode — no model loaded, input passed straight through ────────
-        if bypass:
-            print("[LTX2] Bypass ON — skipping model, passing user_input directly.")
-            neg_prompt = _build_negative_prompt("", user_input)
-            return (user_input.strip(), user_input.strip(), neg_prompt)
-
-        # ── API backend route ─────────────────────────────────────────────────────
-        if backend == "OpenAI-Compatible API":
-            return self._generate_api(
-                user_input=user_input,
-                host=api_host,
-                port=api_port,
-                model=api_model_custom.strip() or api_model,
-                creativity=creativity,
-                seed=seed,
-                top_k=api_top_k,
-                top_p=api_top_p,
-                repeat_penalty=api_repeat_penalty,
-                invent_dialogue=invent_dialogue,
-                frame_count=frame_count,
-                scene_context=scene_context,
-                lora_triggers=lora_triggers,
-                keep_model_loaded=keep_model_loaded,
-            )
-
-        # ── Transformers backend ──────────────────────────────────────────────────
-        path_map = {
-            "8B - NeuralDaredevil (High Quality)": local_path_8b,
-            "3B - Llama-3.2 Abliterated (Low VRAM)": local_path_3b,
-        }
-        local_path = path_map.get(model, "")
-        self.load_model(model_key=model, offline_mode=offline_mode, local_path=local_path)
-
-        # Build shared prompt messages
-        messages, token_val, max_tokens_actual, temperature = self._build_prompt_messages(
-            user_input=user_input,
-            creativity=creativity,
-            invent_dialogue=invent_dialogue,
-            frame_count=frame_count,
-            scene_context=scene_context,
-            lora_triggers=lora_triggers,
-        )
-
-        min_tokens = int(token_val * 0.75)
-
-        # --- Seed ---
-        if seed != -1:
-            torch.manual_seed(seed)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(seed)
-
-        # --- Build stop token list (the ironclad fix) ---
-        # This encodes every known role delimiter into actual token IDs so the
-        # model hard-stops before it can write "assistant" or any turn boundary.
-        stop_token_ids = self._build_stop_token_ids()
 
         # apply_chat_template returns different types depending on the
         # transformers version and tokenizer implementation:
@@ -1110,6 +1005,7 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
             messages,
             return_tensors="pt",
             add_generation_prompt=True,
+            enable_thinking=False if is_qwen3 else None,
         )
         if hasattr(raw, "input_ids"):
             # BatchEncoding object (transformers 4.43+)
@@ -1154,70 +1050,14 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
 
         # Regex clean as a last-resort safety net (should rarely trigger now)
         result = self._clean_output(result)
+        # Strip any lone trailing bracket left by model
+        result = re.sub(r'\s*[\(\[]\s*$', '', result).strip()
 
         # --- Build negative prompt ---
         neg_prompt = _build_negative_prompt(result, user_input)
 
         if not keep_model_loaded:
             self.unload_model()
-
-        return (result, result, neg_prompt)
-
-    def _generate_api(self, user_input, host, port, model,
-                      creativity, seed,
-                      top_k, top_p, repeat_penalty,
-                      invent_dialogue, frame_count,
-                      scene_context="", lora_triggers="",
-                      keep_model_loaded=False):
-        """Generate a cinematic prompt via an OpenAI-compatible API server."""
-        # Refresh model list cache
-        _fetch_api_models(host, port)
-
-        # Validate model selection
-        effective_model = model.strip()
-        if not effective_model or effective_model.startswith("("):
-            return (
-                "[LTX2-API] No model selected. "
-                "Type a model ID in 'api_model_custom' or ensure your server is running.",
-                "[LTX2-API] No model selected.",
-                "",
-            )
-
-        # Build shared prompt messages (identical to transformers path)
-        messages, token_val, max_tokens_actual, temperature = self._build_prompt_messages(
-            user_input=user_input,
-            creativity=creativity,
-            invent_dialogue=invent_dialogue,
-            frame_count=frame_count,
-            scene_context=scene_context,
-            lora_triggers=lora_triggers,
-        )
-
-        params = {
-            "model":       effective_model,
-            "temperature": temperature,
-            "max_tokens":  max_tokens_actual,
-            "top_k":       top_k,
-            "top_p":       top_p,
-            "repeat_penalty": repeat_penalty,
-        }
-        if seed != -1:
-            params["seed"] = seed
-
-        try:
-            raw_result = _call_api(host=host, port=port, messages=messages, params=params)
-        except RuntimeError as e:
-            error_str = str(e)
-            print(error_str)
-            return (error_str, error_str, "")
-
-        result = self._clean_output(raw_result)
-        neg_prompt = _build_negative_prompt(result, user_input)
-
-        print(f"[LTX2-API] Output: {len(result.split())} words.")
-
-        if not keep_model_loaded:
-            _unload_api_model(host, port, effective_model)
 
         return (result, result, neg_prompt)
 
