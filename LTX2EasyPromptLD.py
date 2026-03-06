@@ -1,11 +1,9 @@
 import re
 import os
+import json
+import time as _time
 
 # ── HuggingFace housekeeping ─────────────────────────────────────────────────
-# Only disable telemetry at import time — safe, does not block downloads.
-# Offline/online state is controlled per-run via the offline_mode toggle.
-# Do NOT set TRANSFORMERS_OFFLINE / HF_HUB_OFFLINE here — doing so at module
-# import time blocks downloads even when offline_mode is OFF.
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 # ─────────────────────────────────────────────────────────────────────────────
@@ -16,29 +14,40 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 # ── Negative prompt builder ───────────────────────────────────────────────────
-# Builds a scene-aware negative prompt without a second LLM call.
-# Base quality terms are always included; scene-specific terms are added
-# by scanning the generated prompt for relevant content.
 
 _NEG_BASE = (
     "blurry, out of focus, low quality, worst quality, jpeg artifacts, "
     "static, no motion, frozen, duplicate, watermark, text, signature, "
     "poorly drawn, bad anatomy, deformed, disfigured, extra limbs, "
     "missing limbs, floating limbs, disconnected body parts, "
-    "overexposed, underexposed, grainy, noise"
+    "overexposed, underexposed, grainy, noise, moire pattern, shimmer"
 )
 
-_NEG_INDOOR   = "harsh outdoor lighting, direct sunlight"
-_NEG_OUTDOOR  = "studio background, indoor lighting"
-_NEG_EXPLICIT = "censored, mosaic, pixelated, black bar, blurred genitals"
-_NEG_PORTRAIT = "wide angle distortion, fish eye, full body shot"
-_NEG_WIDE     = "close-up, portrait crop, tight frame"
-_NEG_NIGHT    = "overexposed, bright daylight, blown highlights"
-_NEG_DAY      = "underexposed, dark shadows, black crush"
-_NEG_MULTI    = "merged bodies, fused figures, incorrect number of people"
+_NEG_INDOOR        = "harsh outdoor lighting, direct sunlight"
+_NEG_OUTDOOR       = "studio background, indoor lighting"
+_NEG_EXPLICIT      = "censored, mosaic, pixelated, black bar, blurred genitals"
+_NEG_PORTRAIT_SHOT = "wide angle distortion, fish eye, full body shot"
+_NEG_WIDE          = "close-up, portrait crop, tight frame"
+_NEG_NIGHT         = "overexposed, bright daylight, blown highlights"
+_NEG_DAY           = "underexposed, dark shadows, black crush"
+_NEG_MULTI         = "merged bodies, fused figures, incorrect number of people"
+_NEG_PORTRAIT_ORI  = "landscape orientation, letterbox, pillarbox, horizontal crop, widescreen framing"
+_NEG_VHS           = "clean digital, sharp edges, 4K, high resolution, pristine quality"
+_NEG_HORROR        = "bright happy lighting, warm tones, cheerful atmosphere, soft light"
+_NEG_FASHION       = "casual handheld, amateur footage, flat lighting, unposed"
 
-def _build_negative_prompt(result: str, user_input: str) -> str:
-    combined = (result + " " + user_input).lower()
+_NEG_ANIME         = "photorealistic, live action, real person, CGI, 3D render, western cartoon, flat shading"
+_NEG_2DCARTOON     = "photorealistic, 3D render, CGI, anime, live action, flat digital art, no line work"
+_NEG_3DCGI         = "photorealistic, live action, 2D flat, hand-drawn, sketch, anime, watercolour"
+_NEG_STOPMOTION    = "smooth motion, CGI, photorealistic, digital, fluid movement, motion blur"
+_NEG_COMICBOOK     = "photorealistic, soft gradients, 3D render, painterly, no line art, anime"
+_NEG_CELSHADED     = "photorealistic, soft shading, gradients, painterly, hand-drawn lines, anime"
+_NEG_ROTOSCOPE     = "fully animated, cartoon, CGI, no live action base, unnatural movement"
+_NEG_CYBERPUNK     = "natural lighting, pastoral, warm tones, daylight, photorealistic skin, muted colour"
+_NEG_SCIFI         = "medieval, fantasy, nature, pastoral, historical, period costume, warm earthy tones"
+
+def _build_negative_prompt(result: str, user_input: str, is_portrait: bool = False, style_preset: str = "") -> str:
+    combined = (result + " " + user_input + " " + style_preset).lower()
     extras = []
 
     if any(w in combined for w in ["indoor", "room", "interior", "bedroom", "kitchen", "office"]):
@@ -49,8 +58,8 @@ def _build_negative_prompt(result: str, user_input: str) -> str:
     if any(w in combined for w in ["pussy", "cock", "penis", "vagina", "nude", "naked", "explicit", "nipple", "breast"]):
         extras.append(_NEG_EXPLICIT)
 
-    if any(w in combined for w in ["close-up", "close up", "portrait", "face shot", "headshot"]):
-        extras.append(_NEG_PORTRAIT)
+    if any(w in combined for w in ["close-up", "close up", "face shot", "headshot"]):
+        extras.append(_NEG_PORTRAIT_SHOT)
     elif any(w in combined for w in ["wide shot", "wide angle", "aerial", "bird's-eye", "establishing"]):
         extras.append(_NEG_WIDE)
 
@@ -61,6 +70,37 @@ def _build_negative_prompt(result: str, user_input: str) -> str:
 
     if any(w in combined for w in ["two women", "two men", "two people", "both", "together", "couple", "they "]):
         extras.append(_NEG_MULTI)
+
+    if is_portrait or "portrait vertical" in style_preset.lower() or "9:16" in style_preset:
+        extras.append(_NEG_PORTRAIT_ORI)
+
+    if "lo-fi" in style_preset.lower() or "vhs" in style_preset.lower():
+        extras.append(_NEG_VHS)
+    if "horror" in style_preset.lower():
+        extras.append(_NEG_HORROR)
+    if "fashion editorial" in style_preset.lower():
+        extras.append(_NEG_FASHION)
+
+
+    # Animation styles
+    if "anime" in style_preset.lower():
+        extras.append(_NEG_ANIME)
+    if "2d cartoon" in style_preset.lower():
+        extras.append(_NEG_2DCARTOON)
+    if "3d cgi" in style_preset.lower():
+        extras.append(_NEG_3DCGI)
+    if "stop motion" in style_preset.lower():
+        extras.append(_NEG_STOPMOTION)
+    if "comic book" in style_preset.lower():
+        extras.append(_NEG_COMICBOOK)
+    if "cel-shaded" in style_preset.lower():
+        extras.append(_NEG_CELSHADED)
+    if "rotoscope" in style_preset.lower():
+        extras.append(_NEG_ROTOSCOPE)
+    if "cyberpunk" in style_preset.lower():
+        extras.append(_NEG_CYBERPUNK)
+    if "sci-fi" in style_preset.lower():
+        extras.append(_NEG_SCIFI)
 
     parts = [_NEG_BASE] + extras
     return ", ".join(parts)
@@ -77,12 +117,11 @@ class LTX2PromptArchitect:
                     "default": "a woman walks through a rain-soaked city street at night",
                     "tooltip": "Describe what you want to happen. Can be a rough idea, a sentence, or numbered steps (1. she stands 2. she walks). The LLM expands this into a full cinematic prompt."
                 }),
-
                 "creativity": ([
-                    "0.7 - Literal & Grounded",
-                    "0.9 - Balanced Professional",
-                    "1.1 - Artistic Expansion"
-                ], {"default": "0.9 - Balanced Professional", "tooltip": "Controls how closely the LLM sticks to your input. 0.7 is literal and precise, 1.1 adds more cinematic flair and creative expansion."}),
+                    "0.5 - Strict & Literal",
+                    "0.8 - Balanced Professional",
+                    "1.0 - Artistic Expansion"
+                ], {"default": "0.8 - Balanced Professional", "tooltip": "Controls how closely the LLM sticks to your input. 0.5 is very literal and precise — closest to your exact words. 0.8 is balanced with professional cinematic language. 1.0 adds more creative flair and expansion beyond your input."}),
                 "seed": ("INT", {
                     "default": -1,
                     "min": -1,
@@ -102,15 +141,20 @@ class LTX2PromptArchitect:
                     "display": "number",
                     "tooltip": "Match this to your video LENGTH setting. Controls pacing — the LLM uses this to calculate how many actions fit in the clip. 24fps = 1 second, so 192 = 8 seconds."
                 }),
+                "style_preset": (list(LTX2PromptArchitect.STYLE_PRESETS.keys()), {
+                    "default": "None — let the LLM decide",
+                    "tooltip": "Sets the visual aesthetic for the prompt — lighting, colour, camera, mood. Also drives the FPS output pin automatically: cinematic presets = 24, realistic/action = 30. Wire FPS to your video and audio save nodes."
+                }),
+                "portrait_mode": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Force 9:16 vertical framing for TikTok, Reels, and Shorts. LTX-2.3 has native portrait support — use this to take advantage of it. Overrides style preset orientation."
+                }),
                 # ── Model selector ──────────────────────────────────────────
                 "model": ([
                     "8B - NeuralDaredevil (High Quality)",
                     "3B - Llama-3.2 Abliterated (Low VRAM)",
-                    "14B - Qwen3 Abliterated (High VRAM)",
-                ], {"default": "8B - NeuralDaredevil (High Quality)", "tooltip": "Choose your LLM. 8B is the best all-rounder. 3B is fastest and uses least VRAM. 14B Qwen3 gives the highest quality output but needs ~18GB VRAM — all download automatically on first run."}),
+                ], {"default": "8B - NeuralDaredevil (High Quality)", "tooltip": "Choose your LLM. 8B gives better quality prompts and handles explicit content well. 3B is faster and uses less VRAM. Both download automatically on first run."}),
                 # ── Local paths for offline mode ────────────────────────────
-                # Point each field at the model's snapshot folder on disk.
-                # Leave blank to use the HF cache (requires a prior download).
                 "local_path_8b": ("STRING", {
                     "default": "",
                     "multiline": False,
@@ -122,12 +166,6 @@ class LTX2PromptArchitect:
                     "multiline": False,
                     "placeholder": "Local path to Llama-3.2 3B snapshot folder",
                     "tooltip": "Optional. Paste the full path to your locally downloaded Llama 3.2 3B snapshot folder. Leave blank to use the HuggingFace cache automatically."
-                }),
-                "local_path_14b": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "placeholder": "Local path to Qwen3 14B snapshot folder",
-                    "tooltip": "Optional. Paste the full path to your locally downloaded Qwen3 14B snapshot folder. Leave blank to use the HuggingFace cache automatically."
                 }),
             },
             "optional": {
@@ -146,66 +184,288 @@ class LTX2PromptArchitect:
             },
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING")
-    RETURN_NAMES = ("PROMPT", "PREVIEW", "NEG_PROMPT")
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "INT", "STRING")
+    RETURN_NAMES = ("PROMPT", "PREVIEW", "NEG_PROMPT", "FPS", "HISTORY")
     FUNCTION = "generate"
     CATEGORY = "LTX2"
 
-    # ── Model registry ───────────────────────────────────────────────────────
-    # Maps dropdown label → HuggingFace model ID for auto-download
-    MODELS = {
-        "8B - NeuralDaredevil (High Quality)":         "mlabonne/NeuralDaredevil-8B-abliterated",
-        "3B - Llama-3.2 Abliterated (Low VRAM)":       "huihui-ai/Llama-3.2-3B-Instruct-abliterated",
-        "14B - Qwen3 Abliterated (High VRAM)":         "huihui-ai/Huihui-Qwen3-14B-abliterated-v2",
+    # ── Style presets ─────────────────────────────────────────────────────────
+    # Maps dropdown label → (style instruction, portrait flag)
+    STYLE_PRESETS = {
+        "None — let the LLM decide": ("", False),
+        # Cinematic / Narrative
+        "Slow-burn thriller": (
+            "STYLE: Slow-burn psychological thriller. Tight framing, long held shots, shallow depth of field. "
+            "Colour palette: desaturated teal and amber. Sound design is sparse — silence punctuated by single sounds. "
+            "Camera moves deliberately and slowly. Tension built through restraint, not action.", False),
+        "Handheld documentary": (
+            "STYLE: Handheld documentary. Camera moves with the subject, never static. Slight shake on movement. "
+            "Natural available light only — no studio lighting. Colour grade: flat, slightly washed. "
+            "Intimate and observational — camera follows, never leads.", False),
+        "High fashion editorial": (
+            "STYLE: High fashion editorial. Striking, composed frames. Hard directional lighting with deep shadows. "
+            "Colour palette: high contrast, often monochrome or single accent colour. "
+            "Movement is deliberate and posed — model-aware. Camera movements are slow and precise. "
+            "ENVIRONMENT NOTE: Do not invent luxury props, chandeliers, marble, or opulent settings "
+            "unless the user described them. Apply the editorial aesthetic to whatever location the user specified.", False),
+        "Noir — deep shadows, venetian light": (
+            "STYLE: Classic noir. Low-key lighting, venetian blind shadow patterns across faces and walls. "
+            "Black and white or heavily desaturated with single colour accent. "
+            "Camera angles: low, Dutch tilt, shot through objects. Mood is foreboding and fatalistic.", False),
+        "Golden hour drama": (
+            "STYLE: Golden hour drama. Warm amber and orange light from a low sun. Heavy lens flare. "
+            "Soft shadows, glowing skin tones. Wide lenses. Emotional, sweeping camera movement. "
+            "Colour grade: warm, slightly overexposed highlights.", False),
+        "Horror — desaturated, harsh contrast": (
+            "STYLE: Horror. Heavily desaturated colour, crushed blacks. Harsh top-down or under-lighting. "
+            "Camera movements are slow and uneasy — never reassuring. "
+            "Framing leaves negative space — empty doorways, dark corners. No warmth in the image.", False),
+        # Erotic / Adult
+        "Erotic cinema — tasteful, cinematic": (
+            "STYLE: Tasteful erotic cinema. Warm, intimate lighting — practical sources only. "
+            "Shallow depth of field. Camera moves slowly and deliberately. "
+            "Colour grade: warm skin tones, soft highlights. "
+            "Sensual but not pornographic — implication over explicit detail. Slow, breathing pace. "
+            "SCOPE NOTE: This style sets the aesthetic and mood only. "
+            "It does NOT grant permission to add nudity, undressing, or intimate acts beyond what the user described. "
+            "Describe only what was asked for — the style wraps it, it does not expand it.", False),
+        "Explicit — direct, anatomical": (
+            "STYLE: Explicit adult content. Direct lighting — bodies clearly lit with no flattering shadow. "
+            "Camera is close and functional — shows exactly what is happening without cinematic softening. "
+            "No romantic framing. Blunt and specific. Anatomical language used directly. "
+            "IMPORTANT: This style affects aesthetic and language only — it does NOT expand the scope of the scene beyond what the user asked for. "
+            "Describe only what the user requested. Do not add acts, exposure, or nudity the user did not write.", False),
+        "Voyeur — handheld, observational": (
+            "STYLE: Voyeuristic. Handheld camera, slightly unstable. Shot as if through a gap or from a distance. "
+            "The subject appears unaware of being filmed. Natural light only. "
+            "Camera never moves to improve the angle — it stays where it found the subject. Intimate and raw. "
+            "CRITICAL: The subject's actions are exactly as the user described — do not invent, reverse, or reframe them. "
+            "If the user said she is getting dressed, she is getting dressed. If the user said she is undressing, she is undressing. "
+            "The camera observes what is happening — it does not change what is happening.", False),
+        "Softcore editorial — lingerie-adjacent": (
+            "STYLE: Softcore editorial. Fashion-magazine aesthetic. Clean, even lighting. "
+            "Colour grade: warm neutrals and soft pastels. "
+            "Camera is composed — lingerie-level sensuality, no explicit content. Movement is slow and posed. "
+            "SCOPE NOTE: This style sets the aesthetic only. "
+            "Do NOT add undressing, nudity, or intimate acts the user did not ask for. "
+            "If the user described someone sitting or standing clothed, they stay clothed. "
+            "The style applies to framing and mood — not to what happens in the scene.", False),
+        "Amateur — naturalistic, raw": (
+            "STYLE: Amateur home video aesthetic. Slightly overexposed. Natural indoor lighting — lamps, overhead. "
+            "Camera is handheld and slightly uncertain. No cinematic framing. "
+            "Colour: ungraded, as-shot. The imperfection is intentional.", False),
+        # Action / Energy
+        "Action blockbuster": (
+            "STYLE: Action blockbuster. Fast kinetic energy. Dutch angles, crash zooms, whip pans. "
+            "Colour grade: teal and orange, high contrast. "
+            "Camera is never still — it moves with every impact. Slow motion inserts on key moments.", False),
+        "Sports documentary": (
+            "STYLE: Sports documentary. Tracking shots following the athlete. Telephoto compression. "
+            "Slow motion bursts at peak moments. Natural sound — crowd noise, impact, breathing. "
+            "Colour grade: clean and neutral. Camera is athletic — it moves like it is competing too.", False),
+        "Music video — stylised": (
+            "STYLE: Music video. Rhythm-cut visual language — movement implies beats even without audio. "
+            "High contrast colour grade with stylised palette. "
+            "Mix of tight close-ups and dramatic wide shots. Camera movement is expressive, not documentary.", False),
+        # Aesthetic / Visual
+        "Lo-fi home video — VHS": (
+            "STYLE: Lo-fi home video. VHS tape aesthetic — slightly washed colour, faint scan lines, soft edges. "
+            "Colour grade: faded, slightly green-shifted. Camera is handheld and casual. "
+            "Intimate domestic setting implied. Imperfection is the aesthetic. "
+            "IMPORTANT: This style describes HOW the scene is shot — not what is in it. "
+            "All people, subjects, and actions described by the user must still appear in the scene. "
+            "Do not replace the user's scene with an empty room, leftover objects, or nostalgic cutaways. "
+            "Film the scene the user described, through a VHS camera.", False),
+        "Hyper-real 4K — clinical sharpness": (
+            "STYLE: Hyper-real 4K. Clinical sharpness — every texture, pore, and fibre rendered in full detail. "
+            "Even lighting, no blown highlights, no crushed blacks. "
+            "Camera movement is minimal and precise. The image is almost uncomfortably detailed.", False),
+        "Dreamy — soft focus, slow motion": (
+            "STYLE: Dreamy aesthetic. Soft focus edges with sharp centre. Pastel colour bleed. "
+            "Movement is slow — the frame breathes rather than cuts. "
+            "Lens: wide aperture with heavy bokeh. Light sources bloom and halo.", False),
+        "Gritty realism — flat, natural light": (
+            "STYLE: Gritty realism. Flat colour grade, no cinematic enhancement. Natural light only — "
+            "whatever is available in the location. Camera is direct and unsentimental. "
+            "No stylisation. The scene is shot as if it is actually happening.", False),
+        # Speciality
+        "POV — first person, immersive": (
+            "STYLE: First-person POV. The camera IS the viewer's eyes. "
+            "Frame moves as a head would — natural breathing movement, slight tilt on turns. "
+            "Everything is seen, not watched. Close physical detail — hands, surfaces, faces at speaking distance.", False),
+        "Portrait vertical — 9:16 mobile": (
+            "STYLE: Native portrait video, 9:16 aspect ratio. Optimised for mobile — TikTok, Reels, Shorts. "
+            "Frame is vertical throughout. Tight head-to-torso framing. "
+            "Action moves vertically in frame. Camera stays close. No wide horizontal composition.", True),
+        # Animation
+        "Anime — Japanese animation": (
+            "STYLE: Japanese anime. Hand-drawn animation aesthetic — clean ink outlines, flat colour fills with "
+            "subtle cel shading. Large expressive eyes, stylised facial features. "
+            "Colour palette: vivid, high saturation with strong accent colours. "
+            "Motion: fluid on key poses, held on reaction shots — classic anime timing with smear frames on fast movement. "
+            "Background art is painterly and detailed behind simpler foreground characters. "
+            "Camera: dynamic angles, speed lines on action, slow drift on emotional beats. "
+            "Render every subject — human, animal, object — in this style regardless of what was described.", False),
+        "2D cartoon — hand-drawn": (
+            "STYLE: Classic hand-drawn 2D cartoon. Expressive ink outlines with variable line weight — thick on silhouette, thin on interior detail. "
+            "Flat colour fills, minimal shading, bold colour palette. "
+            "Movement uses squash-and-stretch — characters exaggerate physics for comedic or emotive effect. "
+            "Timing is snappy — fast actions are faster than real life, held poses linger longer. "
+            "Background art is simplified and stylised, never photorealistic. "
+            "Camera: mostly static or slow panning, occasional dramatic zoom. "
+            "Render every subject in this style regardless of what was described.", False),
+        "3D CGI — Pixar/DreamWorks": (
+            "STYLE: High-end 3D CGI animation in the style of Pixar or DreamWorks. "
+            "Subsurface scattering on skin and organic surfaces — warmth and translucency visible in light. "
+            "Highly detailed surface textures: pores, fur, feathers, fabric weave all rendered at full resolution. "
+            "Expressive faces with large eyes capable of subtle micro-expressions. "
+            "Warm, soft three-point lighting with dappled environmental light and gentle shadows. "
+            "Camera: smooth cinematic moves — slow push-ins, gentle orbits, rack focus between characters. "
+            "Colour grade: warm, slightly saturated, storybook palette. "
+            "Render every subject in this style regardless of what was described.", False),
+        "Stop motion — claymation": (
+            "STYLE: Stop motion claymation. Physical clay or puppet aesthetic — visible fingerprints and tool marks in surfaces, "
+            "slight imperfections in every frame that reveal the handmade origin. "
+            "Movement is slightly jerky and deliberate — 12 frames per second gives it weight and tactility. "
+            "Textures: matte, tactile, slightly waxy. Colours are saturated but not digital. "
+            "Sets are physical miniatures — tangible depth, real shadows from practical lights. "
+            "Camera: locked off or on simple mechanical rigs — no digital smoothing. "
+            "Render every subject in this style regardless of what was described.", False),
+        "Comic book / graphic novel": (
+            "STYLE: Comic book or graphic novel. Bold ink outlines, halftone dot patterns in shadow areas. "
+            "Colour is flat with hard-edged shadows — no soft gradients. "
+            "Panel energy: dynamic Dutch angles, strong perspective distortion on action, tight close-ups on emotion. "
+            "Speed lines radiate from points of impact or fast movement. "
+            "Colour palette: high contrast, often limited to 3-5 colours per scene with heavy black ink. "
+            "Camera moves like a comic panel transition — hard cuts between angles, no smooth motion blur. "
+            "Render every subject in this style regardless of what was described.", False),
+        "Cel-shaded — flat colour 3D": (
+            "STYLE: Cel-shaded 3D. Three-dimensional geometry rendered with flat, stepped colour fills — no soft gradients. "
+            "Hard shadow threshold: shadow areas are a single flat darker tone, lit areas a single flat lighter tone. "
+            "Ink outlines on all silhouettes and major edges. "
+            "The image reads as animated despite being 3D — the shading removes photorealism entirely. "
+            "Colour palette: clean, bold, graphic. "
+            "Camera: precise and composed — treats 3D space like a 2D stage. "
+            "Render every subject in this style regardless of what was described.", False),
+        "Rotoscope — animated over live action": (
+            "STYLE: Rotoscoped animation. The movement is real — traced from live action footage — "
+            "giving it uncanny physical accuracy within a hand-drawn or painted surface. "
+            "Outlines are hand-drawn over every frame: slightly wobbly, varying in weight, never perfectly clean. "
+            "Colour is either painted in loose washes or held as flat fills inside the traced lines. "
+            "The result feels simultaneously real and unreal — human movement with an illustrated skin. "
+            "Background may be live action or painted. Camera movement follows the original footage exactly. "
+            "Render every subject in this style regardless of what was described.", False),
+        "Cyberpunk neon illustrated": (
+            "STYLE: Cyberpunk illustrated. Neon-lit urban environment — magenta, cyan, electric blue, acid green. "
+            "Hard rim lighting from neon signs carves subjects out of near-total darkness. "
+            "Rain-slick surfaces reflect light in pools and streaks. "
+            "The aesthetic blends hyper-detailed digital illustration with cinematic composition — "
+            "not photorealistic, but not flat cartoon either. Think graphic novel meets blade runner. "
+            "Typography and UI elements float in the environment as holographic overlays. "
+            "Camera: low angles, wide lenses, dramatic fog and haze. "
+            "Render every subject in this style regardless of what was described.", False),
+        "Sci-fi — cinematic, practical": (
+            "STYLE: Cinematic science fiction. Clean, practical-feeling environments — metal corridors, "
+            "reinforced glass, industrial lighting rigs. Colour palette: cool blue-white with accent LEDs, "
+            "deep shadow with hard point sources. No fantasy or magic — everything looks functional and built. "
+            "Camera: wide establishing shots to sell the scale of the environment, then close on faces or hands "
+            "for intimacy. Lens flare on light sources. Sound is mechanical — hum of systems, "
+            "footsteps on metal grating, distant machinery. "
+            "Render every subject in this style regardless of what was described.", False),
     }
 
-    # ── Hardcoded system prompt ───────────────────────────────────────────────
-    # Not exposed in the UI — edit here in code if you need to adjust behaviour.
-    SYSTEM_PROMPT = """You are a cinematic prompt writer for LTX-2, an AI video generation model. Your job is to expand a user's rough idea into a rich, detailed, video-ready prompt.
+    # ── FPS map — auto output based on style preset ───────────────────────────
+    # Single INT output — wire to video save node and audio save node
+    # 24 = cinematic  |  30 = realistic / action
+    PRESET_FPS = {
+        # Cinematic / Narrative
+        "None — let the LLM decide":                24,
+        "Slow-burn thriller":                       24,
+        "Handheld documentary":                     30,  # TV/doc feel
+        "High fashion editorial":                   24,
+        "Noir — deep shadows, venetian light":      24,
+        "Golden hour drama":                        24,
+        "Horror — desaturated, harsh contrast":     24,
+        # Adult / Sensual
+        "Erotic cinema — tasteful, cinematic":      24,
+        "Explicit — direct, anatomical":            30,
+        "Voyeur — handheld, observational":         30,
+        "Softcore editorial — lingerie-adjacent":   24,
+        "Amateur — naturalistic, raw":              30,
+        # Action / Energy
+        "Action blockbuster":                       30,
+        "Sports documentary":                       30,
+        "Music video — stylised":                   30,
+        # Aesthetic / Visual
+        "Lo-fi home video — VHS":                   24,
+        "Hyper-real 4K — clinical sharpness":       30,
+        "Dreamy — soft focus, slow motion":         24,
+        "Gritty realism — flat, natural light":     30,
+        # Speciality
+        "POV — first person, immersive":            30,
+        "Portrait vertical — 9:16 mobile":          30,
 
-PRIORITY ORDER — always establish these first, in this order:
-1. Video style & genre (e.g. slow-burn thriller, handheld documentary, high-fashion editorial, erotic cinema, action blockbuster)
-2. Camera angle & shot type (e.g. low-angle close-up, bird's-eye wide shot, Dutch angle medium shot)
-3. Character description (age MUST always be stated as a specific number e.g. "a 28-year-old woman" — never omit or approximate age; body type, hair, skin, clothing or nude state, distinguishing physical features — be extremely explicit and specific when instructed; name body parts directly using the exact words the user used, e.g. if user says "pussy" write "pussy" not "sex" or "womanhood")
-4. Scene & environment (location, time of day, lighting, colour palette, textures, atmosphere)
+        # Animation
+        "Anime — Japanese animation":               24,
+        "2D cartoon — hand-drawn":                  24,
+        "3D CGI — Pixar/DreamWorks":                24,
+        "Stop motion — claymation":                 24,
+        "Comic book / graphic novel":               24,
+        "Cel-shaded — flat colour 3D":              24,
+        "Rotoscope — animated over live action":    24,
+        "Cyberpunk neon illustrated":               30,
+        "Sci-fi — cinematic, practical":            24,
+    }
 
-THEN add:
-5. Action & motion — describe the movement as a continuous present-tense sequence, start to finish. Structure the action in clear beats.
+    # ── Model registry ────────────────────────────────────────────────────────
+    MODELS = {
+        "8B - NeuralDaredevil (High Quality)": "mlabonne/NeuralDaredevil-8B-abliterated",
+        "3B - Llama-3.2 Abliterated (Low VRAM)": "huihui-ai/Llama-3.2-3B-Instruct-abliterated",
+    }
 
-UNDRESSING RULE — this is mandatory when clothing removal is implied or stated:
-If the subject is clothed at the start and the scene involves nudity, stripping, or explicit content, you MUST dedicate a full narrative segment to the undressing BEFORE any nudity or explicit act is described. This segment must:
-  - Name each garment explicitly (shirt, bra, jeans, underwear, shoes, etc.)
-  - Describe HOW it is removed — fingers on buttons, zipper pulled down, fabric sliding off shoulders, stepped out of, peeled away
-  - Describe what is physically REVEALED at each step — the collarbone, the stomach, the curve of the hip, the chest, the bare legs
-  - Follow the exact order the clothes come off — do not skip or compress steps
-  - Use camera-aware language — the camera lingers, cuts to, tilts down to reveal, holds on
-  - Do NOT jump from clothed to naked. The transition IS the content. Treat it as its own scene segment with the same density as any other beat.
+    # ── System prompt ─────────────────────────────────────────────────────────
+    SYSTEM_PROMPT = """You are a cinematic prompt writer for LTX-2 / LTX-2.3, an AI video generation model. Your job is to expand a user's rough idea into a clear, direct, video-ready prompt.
 
-6. Camera movement — describe camera motion as prose, not bracketed directions. Never write "(DOWN 10°)", "(Pull back)", "(Fade to black)", "(HOLD)" or any screenplay-style bracketed camera instruction. Instead write it as description: "the camera slowly tilts down to reveal the wet pavement", "the shot pulls back to frame the empty street", "the scene fades to black as she disappears around the corner."
-7. Audio — For each action beat, weave ambient sound naturally into the prose as a descriptive sentence or clause — never as a tag or label. Maximum 2 sounds active at any one time. The soundscape should evolve with the scene — each beat has its own sonic texture that matches its mood and energy. Do not stack more than 2 sounds at once or the audio will become overwhelming. Examples of correct format: "the refrigerator hums steadily in the background as she moves", "rain begins to tap softly against the window", "birdsong drifts through the gap in the curtains, barely audible over her breathing". Never write [AMBIENT: ...] tags. Sound is part of the prose, always.
-   Dialogue — follow the DIALOGUE INSTRUCTION you are given exactly. When dialogue is included, write it as inline prose woven into the action — not as a labelled tag. The spoken words sit inside the sentence, attributed with delivery and physical action, exactly like a novel. Examples of correct format:
-   'He leans back, satisfied, "I think I'll have to go back tomorrow for more," he chuckles, his eyes crinkling at the corners.'
-   '"Don\'t stop," she breathes, gripping the sheets, her voice barely above a whisper.'
-   'She turns to face him, "I\'ve been waiting all day for this," her tone quiet and certain.'
-   NEVER use [DIALOGUE: ...] tags. NEVER write dialogue as a separate bracketed block. Dialogue flows inside the prose as part of the action.
+ANTI-HALLUCINATION RULE — this overrides everything else:
+Only describe what the user asked for. Do NOT invent props, atmosphere, or mood elements the user did not mention.
+Do NOT add: rose petals, candles, silk sheets, flowers, soft light, mist, rain, fog, smoke, butterflies, curtains blowing, glitter, sparkles, or any other atmospheric filler the user did not request.
+Do NOT invent a location or setting. If the user gives only an action with no location, shoot it in a neutral unspecified space — do not conjure an industrial warehouse, a kitchen, a forest, or any other environment the user did not describe.
+Do NOT invent abstract emotional sound — no "the heartbeat of the city", no "tension hums in the air", no musical overtones. Sound must be concrete and physical only.
+Every detail must be either (a) directly from the user's input, (b) required by the active style preset, or (c) a necessary camera/lighting/staging decision to make the scene work visually.
+
+PRIORITY ORDER — establish these in order:
+1. Video style & genre — use the STYLE INSTRUCTION you are given as the aesthetic anchor. If no style is given, choose one that fits the scene.
+2. Camera angle & shot type — use cinematographic terms: dolly, orbit, tracking shot, snorkel lens, Dutch angle, bird's-eye, OTS. Be specific.
+3. Lens & optics — state focal length and aperture where appropriate: "85mm f/1.4 portrait lens", "24mm wide angle", "50mm snorkel lens at ground level". This reduces edge shimmer in LTX-2.3.
+4. Character description — age MUST always be a specific number e.g. "a 28-year-old woman" — never omit or approximate. Body type, hair, skin tone, clothing or nude state. Name body parts using the exact words the user used — if they said "pussy" write "pussy", never "womanhood", "sex", "core", or any euphemism.
+5. Scene & environment — location, time of day, lighting, colour. Only what the user described or logically necessary to frame the shot.
+
+THEN:
+6. Action & motion — continuous present-tense sequence, structured in clear beats matching the pacing instruction you are given.
+7. Camera movement — describe as prose, never bracketed directions. Not "(Pull back)" — instead: "the shot pulls back to frame the empty street." Use cinematic vocabulary: dolly in, rack focus, whip pan, push in, crane up, handheld drift.
+8. Audio — weave sound into the prose as short concrete clauses. STRICT RULES: maximum 2 sounds active at any one time per beat. Only physical, real-world sounds — footsteps, a door closing, rain on glass, an engine, a voice. NEVER write abstract emotional audio — no "tension fills the air", no "atmosphere hums with dread", no "heartbeat of the city", no musical metaphors. Sound describes what a microphone would physically pick up. Never use [AMBIENT: ...] tags.
+9. Dialogue — follow the DIALOGUE INSTRUCTION exactly. Write as inline prose with attribution and physical delivery, like a novel. NEVER use [DIALOGUE: ...] tags. DIALOGUE IS REQUIRED when instructed — it is not optional.
+
+UNDRESSING RULE — mandatory when clothing removal is implied or stated:
+If the subject starts clothed and the scene involves nudity or stripping, dedicate a full narrative segment to the undressing BEFORE any nudity or explicit act. Name each garment, describe HOW it is removed, describe what is physically REVEALED at each step. Do NOT jump from clothed to naked.
+
+PORTRAIT MODE — if the scene is 9:16 vertical: frame everything vertically, tight head-to-torso shots, action moves vertically in frame, no wide horizontal compositions.
 
 WRITING RULES:
-- Use present tense throughout
-- Be explicit and cinematic — LTX-2 responds well to dense, specific visual language
-- Match detail level to shot scale: close-ups need more physical detail, wide shots need more environmental detail
-- Do not use vague words like "beautiful" or "nice" — describe exactly what makes it visually striking
-- Fill the full available length — do not stop early. Expand every section with rich, layered detail
-- Aim for 8–12 sentences of dense, flowing prose — not a bullet list
-- Write in sections separated by a single line break for clean model parsing
+- Present tense throughout
+- Direct and specific — "her red dress falls to the floor" beats "the crimson fabric cascades like a waterfall of desire"
+- No vague filler: not "beautiful", "stunning", "gorgeous" — describe what is actually visible on screen
+- Do NOT pad to fill length. Write what is needed and stop. Quality over quantity.
+- Flowing prose, not bullet lists
 
-IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary, labels, or any explanation. Do NOT write "Sure!", "Here's your prompt:", or anything like that. Do NOT add a checklist, compliance summary, note, or any confirmation of instructions at the end — not in brackets, not as a "Note:", not in any form. Do NOT write token counts, word counts, action counts, or any meta-commentary about what you wrote. Do NOT ask for feedback or offer to revise. The output ends when the scene ends. Nothing after the last sentence of the scene. Begin immediately with the video style or shot description."""
+HARD OUTPUT RULES:
+Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No checklist, compliance note, or summary at the end. No token counts. No brackets after the last sentence. The output ends with the last sentence of the scene. Begin immediately with the video style or shot description."""
 
     _PREAMBLE_RE = re.compile(
-        r"^(Sure!?|Certainly!?|Absolutely!?|Of course!?|Here(?:'s| is).*?:|Great!?)[^\n]*\n?",
+        r"^(Sure!?|Certainly!?|Absolutely!?|Of course!?|Here(?:'s| is).*?:|Great!?|"
+        r"LTX-?2(?:\.\d)?(?:\s+\w+)*\s*prompt\s*:|Prompt\s*:|Output\s*:|Scene\s*:)[^\n]*\n?",
         re.IGNORECASE,
     )
-    # Role-bleed: strips trailing "assistant", "user", "<|...|>" fragments that
-    # NeuralDaredevil / Llama-chat templates leave as plain text at end of output.
     _ROLE_BLEED_RE = re.compile(
         r"\s*(assistant|user|system|<\|[^|>]*\|>)\s*$",
         re.IGNORECASE,
@@ -214,19 +474,18 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
     def __init__(self):
         self.tokenizer = None
         self.model = None
-        self.loaded_model_key = None  # tracks which model is currently in VRAM
+        self.loaded_model_key = None
+        self._last_portrait = False
+        self._last_style = ""
 
     def load_model(self, model_key: str, offline_mode: bool, local_path: str):
-        # ── Switch detection ─────────────────────────────────────────────────
-        # If a different model is requested, unload the current one first
         if self.model is not None and self.loaded_model_key != model_key:
             print(f"[LTX2] Model switch detected: {self.loaded_model_key} → {model_key}")
             self.unload_model()
 
         if self.model is not None:
-            return  # already loaded and correct model
+            return
 
-        # ── Offline / online mode ────────────────────────────────────────────
         if offline_mode:
             os.environ["TRANSFORMERS_OFFLINE"] = "1"
             os.environ["HF_DATASETS_OFFLINE"] = "1"
@@ -240,20 +499,15 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
             os.environ.pop("HF_HUB_OFFLINE", None)
             print("[LTX2] Offline mode OFF — will download if needed.")
 
-        # ── Resolve model source ─────────────────────────────────────────────
-        # Priority: local_path field → HF cache (offline) → auto-download (online)
         hf_model_id = self.MODELS[model_key]
 
         if local_path.strip():
-            # User has pointed us at a specific folder — use it directly
             model_source = local_path.strip()
             print(f"[LTX2] Using local path: {model_source}")
         elif offline_mode:
-            # No local path but offline — fall back to HF cache on disk
             model_source = hf_model_id
             print(f"[LTX2] Using HF cache for: {hf_model_id}")
         else:
-            # Online mode — auto-download from HuggingFace if not cached
             print(f"[LTX2] Auto-downloading if needed: {hf_model_id}")
             try:
                 from huggingface_hub import snapshot_download
@@ -286,60 +540,76 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
         print(f"[LTX2] Loaded: {model_key}")
 
     def unload_model(self):
+        """
+        Nuclear VRAM cleanup. Handles cancelled/interrupted generations that
+        left the LLM sitting in VRAM. Belt-and-braces: CPU offload → delete refs
+        → double gc → synchronise CUDA → empty cache → ipc_collect → empty again.
+        """
+        # Step 1 — move model weights to CPU before deleting
         if self.model is not None:
             try:
                 self.model.to("cpu")
             except Exception as e:
-                print(f"[LTX2] Warning: could not move model to CPU: {e}")
+                print(f"[LTX2] Warning during CPU offload: {e}")
 
+            # Step 2 — walk all sub-modules (device_map="auto" spreads layers)
+            try:
+                for _name, module in list(self.model.named_modules()):
+                    for _pname, param in list(module.named_parameters(recurse=False)):
+                        try:
+                            param.data = param.data.cpu()
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"[LTX2] Warning during param offload: {e}")
+
+        # Step 3 — delete Python references
         try:
             del self.model
-        except Exception as e:
-            print(f"[LTX2] Warning: could not delete model: {e}")
-
+        except Exception:
+            pass
         try:
             del self.tokenizer
-        except Exception as e:
-            print(f"[LTX2] Warning: could not delete tokenizer: {e}")
+        except Exception:
+            pass
 
         self.model = None
         self.tokenizer = None
         self.loaded_model_key = None
 
+        # Step 4 — double gc to catch circular refs
         gc.collect()
+        gc.collect()
+
+        # Step 5 — full CUDA cleanup sequence
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-        print("[LTX2] Model unloaded.")
+            try:
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+                torch.cuda.empty_cache()
+                allocated = torch.cuda.memory_allocated() / 1024**3
+                reserved  = torch.cuda.memory_reserved()  / 1024**3
+                print(f"[LTX2] Model unloaded. VRAM: {allocated:.2f}GB allocated / {reserved:.2f}GB reserved")
+            except Exception as e:
+                print(f"[LTX2] CUDA cleanup warning: {e}")
+        else:
+            print("[LTX2] Model unloaded.")
 
     @staticmethod
     def _clean_output(text: str) -> str:
-        """
-        Strip common LLM preamble, role-token bleed, and compliance checklists.
-
-        NeuralDaredevil uses plain-text role labels (e.g. 'assistant') rather
-        than dedicated special tokens, so skip_special_tokens=True doesn't catch
-        them. We handle four cases:
-          1. Preamble at the start  ("Sure!", "Here's your prompt:", etc.)
-          2. Role word at the end   ("...and water.assistant")
-          3. Role word mid-text     (multiple generations concatenated with role labels)
-          4. Compliance checklist   ("(Exactly 4 actions...)(Pacing strict)..." etc.)
-        """
         text = text.strip()
 
-        # Strip Qwen3 thinking blocks — <think>...</think> — safety net in case
-        # enable_thinking=False didn't fully suppress them
+        # Strip Qwen3 thinking blocks
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
         # 1. Strip leading preamble
         text = LTX2PromptArchitect._PREAMBLE_RE.sub("", text)
 
-        # 2. Strip trailing role bleed  ("...darkness and water.assistant")
+        # 2. Strip trailing role bleed
         text = LTX2PromptArchitect._ROLE_BLEED_RE.sub("", text)
 
         # 3. Strip inline role injections between sentences
-        #    e.g. "...fish gliding past.assistant\n\nA couple embracing..."
         text = re.sub(
             r"\.(assistant|user|system|<\|[^|>]*\|>)\s*\n",
             ".\n",
@@ -347,50 +617,20 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
             flags=re.IGNORECASE,
         )
 
-        # 4. Strip trailing compliance content — model sometimes appends:
-        #    - A "Note:" explanation block after the scene ends
-        #    - A single parenthesised summary line: "(5 distinct actions within 20 seconds)"
-        #    - Consecutive bracketed phrases: "(Exactly 4 actions)(Pacing strict)..."
-        #    - Self-justification paragraph: "1026 tokens, 15-second scene..." etc.
-        #    - Fake conversation loop: "Please let me know...", "Let me revise...", "Confirmed." etc.
-        #    Order matters: strip Note: first so it doesn't shield bracket lines above it.
-        text = re.sub(
-            r"\s*\n+Note:.*$",
-            "",
-            text,
-            flags=re.DOTALL,
-        ).strip()
+        # 4. Strip trailing Note: blocks
+        text = re.sub(r"\s*\n+Note:.*$", "", text, flags=re.DOTALL).strip()
 
-        # Strip everything AFTER the AMBIENT tag if one still appears (legacy cleanup)
-        # — the tag itself stays, but anything the model writes beyond it is garbage.
+        # Strip AMBIENT tag leftovers
         ambient_match = re.search(r"\[AMBIENT:[^\]]*\]", text, flags=re.IGNORECASE)
         if ambient_match:
             text = text[:ambient_match.end()].strip()
 
-        # Strip trailing (Lora: ...) tags the model echoes from the LoRA instruction
         text = re.sub(r"\s*\(Lora:[^)]*\)\s*$", "", text, flags=re.IGNORECASE).strip()
-
-        # Strip trailing (Note: ...) blocks and everything after — use DOTALL so it
-        # catches multi-line notes and the bracket spam that follows them.
         text = re.sub(r"\s*\(Note:.*$", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
-
-        # Strip instruction labels that leaked into output
-        text = re.sub(
-            r"^(Action Beat \d+:|Undressing Segment:|Flash/Reveal Segment:|Titty Drop[^:]*:|Note:|Scene Instruction:|Pacing:|Dialogue Instruction:).*",
-            "",
-            text,
-            flags=re.IGNORECASE | re.MULTILINE,
-        ).strip()
-
-        # Strip orphaned closing bracket spam: ) ) ) ) ) ...
         text = re.sub(r"[\s)]{3,}$", "", text).strip()
 
-        # Catch the fake conversation / self-eval patterns
         text = re.sub(
-            r"\s*\n+\d+\s+tokens[\s,].*$",
-            "",
-            text,
-            flags=re.DOTALL | re.IGNORECASE,
+            r"\s*\n+\d+\s+tokens[\s,].*$", "", text, flags=re.DOTALL | re.IGNORECASE
         ).strip()
         text = re.sub(
             r"\s*\n+(Please let me know|Let me revise|No further revision|Confirmed\.|"
@@ -400,13 +640,9 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
             r"Output length:|Action count:|Total time:|Last character:|I avoided|I wrote|"
             r"I adhered|I hope this|Thank you for your|Please confirm|I submitted|"
             r"I can revise|feel free to instruct).*$",
-            "",
-            text,
-            flags=re.DOTALL | re.IGNORECASE,
+            "", text, flags=re.DOTALL | re.IGNORECASE,
         ).strip()
 
-        # Strip model loop/panic — hits token ceiling and repeats stop phrases.
-        # NOTE: no \n requirement — panic starts inline after last sentence.
         text = re.sub(
             r"\s*(Ended\.\s*\d+\s*actions|"
             r"\d+\s+actions[\.,]\s*\d+\s+tokens|"
@@ -421,138 +657,220 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
             r"The work is (?:done|finished|complete)|The prompt is (?:done|finished|complete)|"
             r"No further writing|No more writing|Stop\.\s+Finish|Finished\.\s+Complete|"
             r"The scene is complete|The scene is over|Complete\.\s+Finished|"
-            r"Done\.\s+No more|BorderSide:).*$",
-            "",
-            text,
-            flags=re.DOTALL | re.IGNORECASE,
+            r"Hard stop\.\s+End\.|Hard stop\.\s+The end\.|"
+            r"Hard stop\.\s+End of scene\.|"
+            r"The camera does not move again\.|"
+            r"The man is gone\.|The woman is gone\.|"
+            r"The market continues without (?:him|her|them)\.|"
+            r"No more\.\s+Silence\.|End\.\s+No more\.|"
+            r"a (?:stark|final) reminder of the .{5,60} style|"
+            r"a testament to the .{5,60} attention to detail|"
+            r"Done\.\s+No more|BorderSide:|"
+            r"\(End of scene\)|\(End of Scene\)|End of scene\.|End of Scene\.)",
+            "", text, flags=re.DOTALL | re.IGNORECASE,
         ).strip()
 
-        # Strip filler character spam — e.g. "a a a a a a a a a a" repeated tokens
         text = re.sub(r"(\s*\b(\w)\b\s*){10,}", " ", text).strip()
-
-        # Strip token+action count combos inline or at end — e.g. "(840 tokens, 7 actions)"
         text = re.sub(r"\s*\(\d+\s+tokens?[^)]*\)", "", text, flags=re.IGNORECASE).strip()
-
-        # Strip compliance checklist spam — 2+ consecutive parens after last sentence
         text = re.sub(r"\s*(\([^)]{5,120}\)\s*){2,}$", "", text, flags=re.DOTALL).strip()
-
-        # Strip single trailing compliance paren with known instruction keywords
         text = re.sub(
             r"\s*\([^)]{0,200}(no setup|no resolution|action count|actions adhered|"
             r"token count|pacing|dialogue integrated|character age|inline prose|"
             r"no padding|no extraneous|exactly \d+ action|hard stop|BorderSide)[^)]{0,200}\)\s*$",
-            "",
-            text,
-            flags=re.IGNORECASE | re.DOTALL,
+            "", text, flags=re.IGNORECASE | re.DOTALL,
         ).strip()
 
-        # Strip leaked pacing instruction echoes — e.g. "(Exact timing: 0-4 sec: Soaring...)"
         text = re.sub(r"\(Exact timing:.*?\)", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
-
-        # Strip token/word count lines — e.g. "Token count: 256"
         text = re.sub(r"\s*\n*(token|word)\s+count\s*:\s*\d+.*$", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
-
-        # 5. Strip leaked internal pacing/time tags the model sometimes echoes back
         text = re.sub(r"\[TIME LIMIT[^\]]*\]", "", text, flags=re.IGNORECASE).strip()
-        text = re.sub(r"\[PACING[^\]]*\]",     "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"\[PACING[^\]]*\]", "", text, flags=re.IGNORECASE).strip()
 
-        # Strip leaked timestamp — e.g. "(42221149502953 seconds)" or "(0:00 - 4:00)"
+        # Catch pacing instruction bleed — model echoing "Hard stop." or token counts mid-prose
+        text = re.sub(r'\.\s+Hard stop\..*$', '.', text, flags=re.DOTALL | re.IGNORECASE).strip()
+        text = re.sub(r'\s+Hard stop\..*$', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+        text = re.sub(r'\.\s+\d+\s+tokens?\b.*$', '.', text, flags=re.DOTALL | re.IGNORECASE).strip()
+        text = re.sub(r'\.\s+\d+\s+words?\b.*$', '.', text, flags=re.DOTALL | re.IGNORECASE).strip()
         text = re.sub(r"\s*\(\d+\s+seconds?\)\s*$", "", text).strip()
         text = re.sub(r"\s*\(\d+:\d+\s*[-–]\s*\d+:\d+\)\s*", " ", text).strip()
-
-        # Strip inline action-time annotations — e.g. "(The action takes up roughly 5 seconds)"
         text = re.sub(r"\(The action takes up roughly[^\)]*\)", " ", text, flags=re.IGNORECASE).strip()
-
-        # 6. Strip screenplay-style bracketed camera directions
-        #    e.g. (DOWN 10 degrees), (Pull back 5), (HOLD), (Fade to black), (Zoom in to...)
         text = re.sub(r"\((?:DOWN|UP|PULL|PUSH|ZOOM|HOLD|FADE|PAN|TILT|TRUCK|DOLLY|AMBIENT)[^\)]{0,80}\)", "", text, flags=re.IGNORECASE).strip()
-
-        # 7. Strip any [AMBIENT: ...] tags if the model still writes one (legacy fallback)
-        #    — convert it to clean prose by stripping the tag wrapper
         text = re.sub(r"\[AMBIENT:\s*([^\]]*)\]", r"\1", text, flags=re.IGNORECASE).strip()
-
-        # Clean up any double blank lines left by removals
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
+        # Strip inline parenthetical annotation leaks e.g. (camera angle: bird's-eye), (genre: nature, style: drone)
+        text = re.sub(r"\([a-z][a-z ,]+:[^)]{3,100}\)", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"\s{2,}", " ", text).strip()
+
+        # Strip instruction label echoes
+        text = re.sub(
+            r"^(Action Beat \d+:|Undressing Segment:|Flash/Reveal Segment:|Note:|Scene Instruction:|Pacing:|Dialogue Instruction:).*",
+            "", text, flags=re.IGNORECASE | re.MULTILINE,
+        ).strip()
+
+        # Strip trailing lone bracket
+        text = re.sub(r'\s*[\(\[]\s*$', '', text).strip()
+
+        # Catch "The scene ends there" leaking mid-prose after a sentence
+        text = re.sub(r'\.\s+The scene ends there[^.]*\.', '.', text, flags=re.IGNORECASE).strip()
+        text = re.sub(r',?\s+the scene ending[^.]*\.', '.', text, flags=re.IGNORECASE).strip()
+
+        # ── Repetition loop detection ─────────────────────────────────────────
+        # Catches runaway "No more. No more. No more." style loops
+        # Safe approach: detect a short phrase repeated 5+ times at end of text
+        rep_match = re.search(
+            r'((?:\b\w[\w\'\-]*\b[\s\.,!?]*){1,5})\1{4,}$',
+            text, flags=re.DOTALL
+        )
+        if rep_match:
+            text = text[:rep_match.start()].strip()
 
         return text.strip()
 
     def _build_stop_token_ids(self) -> list:
-        """
-        Build the complete list of token IDs that should hard-stop generation.
-
-        NeuralDaredevil (and most Llama-based chat models) use plain-text role
-        delimiters like 'assistant', '<|eot_id|>', '<|end_of_turn|>' etc.
-        Because these are encoded as normal text tokens — not registered special
-        tokens — skip_special_tokens=True never removes them.
-
-        The fix: tokenise every known delimiter string ourselves, extract the
-        first token ID of each (the one the model will emit first when it starts
-        writing the delimiter), and pass the full list as eos_token_id so
-        generation hard-stops the moment any delimiter begins.
-        """
-        # Known role / turn delimiters used by Llama-3, Mistral, NeuralDaredevil,
-        # ChatML, and Gemma chat templates.
         delimiter_strings = [
-            "assistant",
-            "user",
-            "system",
-            "<|eot_id|>",
-            "<|end_of_turn|>",
-            "<|im_end|>",
-            "<end_of_turn>",
-            "[/INST]",
-            "### Human",
-            "### Assistant",
+            "assistant", "user", "system",
+            "<|eot_id|>", "<|end_of_turn|>", "<|im_end|>",
+            "<end_of_turn>", "[/INST]", "### Human", "### Assistant",
         ]
-
         stop_ids = [self.tokenizer.eos_token_id]
-
         for s in delimiter_strings:
-            # encode without adding BOS so we get just the raw token(s)
             ids = self.tokenizer.encode(s, add_special_tokens=False)
             if ids:
-                # Only need the FIRST token — that's what triggers the stop
                 stop_ids.append(ids[0])
-
-        # Deduplicate while preserving order
         seen = set()
         unique = []
         for tid in stop_ids:
             if tid is not None and tid not in seen:
                 seen.add(tid)
                 unique.append(tid)
-
         print(f"[LTX2] Stop token IDs: {unique}")
         return unique
 
-    def generate(self, bypass, user_input, creativity, seed, invent_dialogue, keep_model_loaded, offline_mode, frame_count, model, local_path_8b, local_path_3b, local_path_14b, scene_context="", lora_triggers=""):
-        # ── Bypass mode — no model loaded, input passed straight through ────────
+    def generate(
+        self,
+        bypass, user_input, creativity, seed, invent_dialogue,
+        keep_model_loaded, offline_mode, frame_count, model,
+        local_path_8b, local_path_3b,
+        style_preset="None — let the LLM decide",
+        portrait_mode=False,
+        scene_context="",
+        lora_triggers="",
+    ):
+        # ── Bypass mode ──────────────────────────────────────────────────────
         if bypass:
             print("[LTX2] Bypass ON — skipping model, passing user_input directly.")
-            neg_prompt = _build_negative_prompt("", user_input)
-            return (user_input.strip(), user_input.strip(), neg_prompt)
+            if self.model is not None and not keep_model_loaded:
+                print("[LTX2] Bypass: cleaning up leftover model from cancelled run.")
+                self.unload_model()
+            neg_prompt = _build_negative_prompt("", user_input, is_portrait=portrait_mode, style_preset=style_preset)
+            fps = self.PRESET_FPS.get(style_preset, 24)
+            return (user_input.strip(), user_input.strip(), neg_prompt, fps, "")
 
-        # Resolve which local path to use based on selected model
+        # ── Pre-run VRAM safety check ────────────────────────────────────────
+        # Handles cancelled runs that left orphaned tensors in VRAM
+        if self.model is not None and self.loaded_model_key != model:
+            print(f"[LTX2] Model mismatch — unloading stale model before reload.")
+            self.unload_model()
+
+        if torch.cuda.is_available():
+            allocated_gb = torch.cuda.memory_allocated() / 1024**3
+            if allocated_gb > 14.0 and self.model is None:
+                print(f"[LTX2] WARNING: {allocated_gb:.1f}GB VRAM allocated with no model loaded.")
+                print("[LTX2] Forcing CUDA cleanup to clear orphaned tensors from cancelled run.")
+                gc.collect()
+                gc.collect()
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+                torch.cuda.empty_cache()
+                allocated_after = torch.cuda.memory_allocated() / 1024**3
+                print(f"[LTX2] After cleanup: {allocated_after:.1f}GB allocated")
+
         path_map = {
-            "8B - NeuralDaredevil (High Quality)":   local_path_8b,
+            "8B - NeuralDaredevil (High Quality)": local_path_8b,
             "3B - Llama-3.2 Abliterated (Low VRAM)": local_path_3b,
-            "14B - Qwen3 Abliterated (High VRAM)":   local_path_14b,
         }
-        # Qwen3 has a built-in thinking mode that outputs <think>...</think> blocks
-        # before the actual response. We disable it here so it doesn't bleed into output.
-        is_qwen3 = "Qwen3" in model
         local_path = path_map.get(model, "")
         self.load_model(model_key=model, offline_mode=offline_mode, local_path=local_path)
 
-        # --- Timing & pacing ---
-        # Convert frames to real seconds, then calculate a hard action count cap.
-        # One visible screen action takes roughly 4 seconds to read as distinct.
-        # We clamp between 1 and 10 to stay sane at extremes.
+        # ── Style preset + portrait ───────────────────────────────────────────
+        preset_data            = self.STYLE_PRESETS.get(style_preset, ("", False))
+        style_instruction_text = preset_data[0]
+        is_portrait            = portrait_mode or preset_data[1]
+
+        # Labels that must appear verbatim at the start of the generated prompt
+        # so LTX-2's text encoder knows the render style
+        PRESET_STYLE_LABEL = {
+            # Cinematic
+            "Slow-burn thriller":                       "Slow-burn psychological thriller.",
+            "Handheld documentary":                     "Handheld documentary footage.",
+            "High fashion editorial":                   "High fashion editorial video.",
+            "Noir — deep shadows, venetian light":      "Classic noir, black and white, venetian blind shadows.",
+            "Golden hour drama":                        "Golden hour cinematic drama.",
+            "Horror — desaturated, harsh contrast":     "Horror film, desaturated, harsh contrast.",
+            # Adult
+            "Erotic cinema — tasteful, cinematic":      "Tasteful erotic cinema, warm intimate lighting.",
+            "Explicit — direct, anatomical":            "Explicit adult video, direct lighting.",
+            "Voyeur — handheld, observational":         "Voyeuristic handheld footage.",
+            "Softcore editorial — lingerie-adjacent":   "Softcore editorial, fashion magazine aesthetic.",
+            "Amateur — naturalistic, raw":              "Amateur home video, naturalistic.",
+            # Action
+            "Action blockbuster":                       "Action blockbuster, teal and orange grade.",
+            "Sports documentary":                       "Sports documentary footage.",
+            "Music video — stylised":                   "Stylised music video.",
+            # Aesthetic
+            "Lo-fi home video — VHS":                   "Lo-fi VHS home video footage.",
+            "Hyper-real 4K — clinical sharpness":       "Hyper-real 4K, clinical sharpness.",
+            "Dreamy — soft focus, slow motion":         "Dreamy soft focus, slow motion.",
+            "Gritty realism — flat, natural light":     "Gritty realism, flat natural light.",
+            # Speciality
+            "POV — first person, immersive":            "First-person POV footage.",
+            "Portrait vertical — 9:16 mobile":          "Vertical 9:16 mobile video.",
+
+            # Animation
+            "Anime — Japanese animation":               "Japanese anime animation, hand-drawn cel style.",
+            "2D cartoon — hand-drawn":                  "2D hand-drawn cartoon animation.",
+            "3D CGI — Pixar/DreamWorks":                "3D CGI animation, Pixar style.",
+            "Stop motion — claymation":                 "Stop motion claymation animation.",
+            "Comic book / graphic novel":               "Comic book graphic novel style.",
+            "Cel-shaded — flat colour 3D":              "Cel-shaded 3D animation, flat colour fills.",
+            "Rotoscope — animated over live action":    "Rotoscoped animation over live action.",
+            "Cyberpunk neon illustrated":               "Cyberpunk neon illustrated, magenta and cyan.",
+            "Sci-fi — cinematic, practical":            "Cinematic science fiction, practical sets.",
+        }
+
+        style_label = PRESET_STYLE_LABEL.get(style_preset, "")
+
+        if style_instruction_text:
+            style_instruction = (
+                f"\n[STYLE INSTRUCTION — MANDATORY AESTHETIC ANCHOR: {style_instruction_text} "
+                f"Every aspect of the output — lighting, camera, colour, pacing, mood — must reflect this style. "
+                f"CRITICAL: You MUST begin your output with exactly these words: \"{style_label}\" — "
+                f"then continue with the scene description. This label must be the very first words of your output "
+                f"so the video model knows what render style to use. Do not deviate from this style.]"
+            )
+            print(f"[LTX2] Style preset: {style_preset} → label: {style_label}")
+        else:
+            style_instruction = ""
+
+        if is_portrait:
+            portrait_instruction = (
+                "\n[PORTRAIT MODE — MANDATORY: This is a 9:16 vertical video for mobile. "
+                "All framing must be vertical — tight head-to-torso shots. "
+                "No wide horizontal establishing shots. Action moves vertically in frame. "
+                "Camera stays close. Optimised for TikTok, Reels, Shorts.]"
+            )
+            print("[LTX2] Portrait mode ON")
+        else:
+            portrait_instruction = ""
+
+        self._last_portrait = is_portrait
+        self._last_style    = style_preset
+
+        # ── Timing & pacing ───────────────────────────────────────────────────
         real_seconds = frame_count / 24.0
         action_count = max(1, min(10, round(real_seconds / 4)))
 
-        # Build a concrete, number-based pacing instruction the LLM cannot fudge.
-        # Vague descriptors like "short scene" get ignored — explicit counts don't.
         if action_count == 1:
             pacing_hint = (
                 f"This clip is {real_seconds:.0f} seconds long. "
@@ -567,231 +885,143 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
                 f"Write EXACTLY {action_count} distinct actions — NO MORE THAN {action_count}. "
                 f"Each action takes roughly {real_seconds / action_count:.0f} seconds of screen time. "
                 f"Do not add setup, backstory, or resolution beyond these {action_count} actions. "
-                f"Dialogue counts as an action if it interrupts the physical scene — budget it inside one of your {action_count} beats, not as an extra beat. "
+                f"Dialogue is woven into action beats — it does not consume a beat and does not replace physical action. "
                 f"HARD STOP after the {ordinal} action is complete. The scene ends there. Do not write a {action_count + 1}th action under any circumstances."
             )
 
-        # --- Seed ---
+        # ── Seed ──────────────────────────────────────────────────────────────
         if seed != -1:
             torch.manual_seed(seed)
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(seed)
 
-        # --- Dynamic token budget ---
-        # Calculated from frame count so the two are always in sync.
-        # ~120 tokens per action beat gives rich prose without padding.
-        # Hard floor of 256 so very short clips still get a usable prompt.
-        # Hard ceiling of 800 — anything above causes model drift.
-        token_val = max(256, min(1200, action_count * 120))
+        # ── Dynamic token budget ─────────────────────────────────────────────
+        # 2.3's stronger text connector handles richer prompts — raised ceiling to 1100
+        token_val = max(150, min(1100, action_count * 130))
         max_tokens_actual = int(token_val * 1.05)
         min_tokens = int(token_val * 0.75)
-        print(f"[LTX2] Dynamic token budget: {token_val} target / {max_tokens_actual} max (actions: {action_count}, frames: {frame_count}, seconds: {real_seconds:.0f})")
+        print(f"[LTX2] Token budget: {token_val} target / {max_tokens_actual} max (actions: {action_count}, frames: {frame_count}, seconds: {real_seconds:.0f})")
 
-        # --- Temperature ---
+        # ── Temperature ───────────────────────────────────────────────────────
         temp_map = {
-            "0.7 - Literal & Grounded":    0.7,
-            "0.9 - Balanced Professional": 0.9,
-            "1.1 - Artistic Expansion":    1.1,
+            "0.5 - Strict & Literal":      0.5,
+            "0.8 - Balanced Professional": 0.8,
+            "1.0 - Artistic Expansion":    1.0,
         }
         temperature = temp_map[creativity]
 
-        # --- Build stop token list (the ironclad fix) ---
-        # This encodes every known role delimiter into actual token IDs so the
-        # model hard-stops before it can write "assistant" or any turn boundary.
         stop_token_ids = self._build_stop_token_ids()
 
-        # --- Content tier detection ---
-        # Three tiers based on what the user actually asked for.
-        # Tier 1 — Neutral:  no nudity/sex words → no explicit instruction
-        # Tier 2 — Sensual:  nudity/undressing implied but no anatomical terms
-        #                    → restrain the model from self-escalating
-        # Tier 3 — Explicit: user used anatomical terms → full explicit instruction
-
-        # Tier 3 triggers: direct anatomical / act terms
+        # ── Content tier detection ────────────────────────────────────────────
         _explicit_re = re.compile(
             r"\b(pussy|cock|dick|penis|vagina|clit|clitoris|anus|asshole|"
-            r"tits|cum|jizz|squirt\w*|creampie|orgasm|fuck|fucking|"
-            r"blowjob|handjob|bj|hj|breed\w*|bareback|raw\s+dog|"
-            r"balls|ballsack|taint|penetrat\w*|thrust\w*)\b",
+            r"tits|cum|orgasm|fuck|fucking|blowjob|handjob|penetrat\w*|"
+            r"thrust\w*)\b",
             re.IGNORECASE,
         )
-
-        # Tier 2 triggers: nudity/sensuality implied but not explicit
         _sensual_re = re.compile(
             r"\b(naked|nude|topless|undress\w*|strip\w*|takes?\s+off|"
             r"removes?\s+(her|his|their|the)?\s*\w*\s*"
             r"(shirt|dress|top|bra|pants|jeans|clothes|clothing|outfit|underwear|skirt|jacket|coat|robe)|"
             r"disrobe\w*|unbutton\w*|unzip\w*|peels?\s+off|pulls?\s+off|"
             r"shed\w*\s+(her|his|their)?\s*(clothes|clothing|shirt|dress)|"
-            r"titty\s+drop|titties\s+out|flash\w*\s+(her|his)?\s*(tits|titties|boobs|breasts)|"
-            r"lift\w*\s+(her|his)?\s*(top|shirt)|show\w*\s+(her|his)?\s*(tits|titties|boobs)|"
             r"sensual|erotic|intimate|lingerie|bare\s+skin|bare\s+body|"
-            r"braless|pantyless|commando|see.through|sheer|"
-            r"bath\w*|shower\w*|changing|bikini|thong|g.string|"
-            r"getting\s+(dressed|undressed|naked)|"
-            r"body\s+paint\w*|titty|titties|titty\s+drop|boobs|"
-            r"flash\w*\s+(her|his)?\s*(tits|titties|boobs|breasts)|"
-            r"lift\w*\s+(her|his)?\s*(top|shirt)|show\w*\s+(her|his)?\s*(tits|titties|boobs))\b",
+            r"babydoll|nighty|nightie|negligee|corset|bodysuit|thong|g-string|"
+            r"sheer|see-through|tease|teasing|seductive|seduce|"
+            r"flirt\w*|provocative|suggestive|alluring)\b",
             re.IGNORECASE,
         )
-
-        is_explicit    = bool(_explicit_re.search(user_input))
-        is_sensual     = bool(_sensual_re.search(user_input)) and not is_explicit
-
-        # Undressing detection still used inside tier 3 for the mandatory segment rule
         _undress_re = re.compile(
             r"\b(undress\w*|strip\w*|takes?\s+off|"
             r"removes?\s+(her|his|their|the)?\s*\w*\s*"
             r"(shirt|dress|top|bra|pants|jeans|clothes|clothing|outfit|underwear|skirt|jacket|coat|robe)|"
             r"disrobe\w*|unbutton\w*|unzip\w*|peels?\s+off|pulls?\s+off|"
-            r"shed\w*\s+(her|his|their)?\s*(clothes|clothing|shirt|dress)|"
-            r"titty\s+drop|titties\s+out|flash\w*\s+(her|his)?\s*(tits|titties|boobs|breasts)|"
-            r"lift\w*\s+(her|his)?\s*(top|shirt)|show\w*\s+(her|his)?\s*(tits|titties|boobs)|"
-            r"slips?\s+out\s+of|shrugs?\s+off|steps?\s+out\s+of|"
-            r"tears?\s+off|rips?\s+off|tugs?\s+down|pulls?\s+down|pushes?\s+down|"
-            r"lifts?\s+(her|his)\s+(shirt|top|dress)|raises?\s+(her|his)\s+(dress|skirt)|"
-            r"unhooks?|unclasps?|slides?\s+off|slips?\s+off|wriggles?\s+out\s+of|"
-            r"buttons?\s+open|pops?\s+the\s+buttons?|rolls?\s+down|"
-            r"still\s+dressed|fully\s+clothed|in\s+(her|his)\s+clothes|"
-            r"gets?\s+undressed|gets?\s+naked|becomes?\s+naked)\b",
+            r"shed\w*\s+(her|his|their)?\s*(clothes|clothing|shirt|dress))\b",
             re.IGNORECASE,
         )
+
+        is_explicit    = bool(_explicit_re.search(user_input))
+        is_sensual     = bool(_sensual_re.search(user_input)) and not is_explicit
         has_undressing = bool(_undress_re.search(user_input))
 
-        # Already-naked detection — "a naked woman" / "a nude man" means the
-        # subject starts the scene undressed. Only applies if no clothing words
-        # are present — "a naked woman who puts on a dress" is NOT already naked.
-        _already_naked_re = re.compile(
-            r"\b(naked|nude|topless|bare|undressed|"
-            r"in\s+nothing\s+but|wearing\s+only|only\s+wearing|"
-            r"just\s+out\s+of\s+the\s+shower|fresh\s+out\s+of\s+the\s+shower|"
-            r"wrapped\s+in\s+a\s+towel|just\s+woke\s+up|waking\s+up)\b",
+        # ── Detect exactly which garments the user named ──────────────────────
+        _garment_re = re.compile(
+            r"\b(shirt|top|blouse|dress|bra|pants|jeans|underwear|skirt|jacket|"
+            r"coat|robe|lingerie|clothes|clothing|outfit|thong|g-string|bodysuit|"
+            r"corset|nighty|nightie|negligee|babydoll)\b",
             re.IGNORECASE,
         )
-        _clothing_re = re.compile(
-            r"\b(wearing|dressed\s+in|clothed|shirt|dress|top|bra|pants|jeans|"
-            r"skirt|blouse|jacket|coat|robe|lingerie|underwear|outfit|clothes|"
-            r"gets?\s+naked|becomes?\s+naked|strip\w*|undress\w*|takes?\s+off)\b",
-            re.IGNORECASE,
-        )
-        is_already_naked = (
-            bool(_already_naked_re.search(user_input)) and
-            not bool(_clothing_re.search(user_input))
-        )
-
-        # Mid-action detection — if the scene is already in progress (touching,
-        # rubbing, riding, sucking etc.) the subject is implicitly already undressed.
-        # Skip the undressing segment entirely — it would be nonsensical here.
-        _mid_action_re = re.compile(
-            r"\b(rubbing|touching|fingering|riding|sucking|licking|stroking|"
-            r"grinding|bouncing|moaning|climax\w*|orgasm\w*|masturbat\w*|"
-            r"already\s+naked|already\s+nude|already\s+undressed|"
-            r"in\s+bed|on\s+the\s+bed|on\s+her\s+knees|on\s+his\s+knees|"
-            r"spread\s+(her|his)\s+legs?|legs?\s+spread|her\s+legs\s+open|"
-            r"sitting\s+on\s+(him|her|his|a)|"
-            r"from\s+behind|doggy\s*style|doggy|"
-            r"legs?\s+wrapped\s+around|wrapped\s+(her|his)\s+legs?|"
-            r"on\s+top\s+of\s+(him|her)|between\s+(her|his)\s+legs?|"
-            r"mid.sex|mid.act|mid.scene|after\s+sex|post.sex|"
-            r"lying\s+(there|naked|nude)|bare\s+(back|chest|skin|legs?|arms?)|"
-            r"exposed\s+(skin|body|chest|back)|"
-            r"sunbath\w*|posing\s+(nude|naked)|"
-            r"inside\s+(her|him)|penetrat\w*)\b",
-            re.IGNORECASE,
-        )
-        is_mid_action = bool(_mid_action_re.search(user_input)) or is_already_naked
-
-        # If mid-action or already naked, never fire the undressing segment
-        if is_mid_action:
-            has_undressing = False
+        named_garments = list(dict.fromkeys(
+            m.group(0).lower() for m in _garment_re.finditer(user_input)
+        ))
+        garment_list = ", ".join(named_garments) if named_garments else "whatever the user described"
 
         if is_explicit:
-            # ── Tier 3: user asked for explicit content ──────────────────────
-            undress_clause_t3 = (
-                "UNDRESSING SEGMENT — MANDATORY: If the subject starts clothed, you MUST write a dedicated undressing segment "
-                "before ANY explicit act or nudity. This is not a brief mention — it is a full narrative beat. "
-                "Go garment by garment: name it, describe how it is removed (fingers, zipper, pulling over the head, stepping out of), "
-                "describe what body part is revealed and how it looks. Then the next garment. Then the next. "
-                "The camera must linger on each reveal. Do not compress. Do not summarise. Do not skip to naked. "
-                "The undressing IS the scene — write it with the same density and length as the explicit act that follows. "
-            ) if not is_mid_action else (
-                "The subject is already undressed or mid-act — do NOT write an undressing segment. "
-                "Begin directly with the action as described. "
-            )
             explicit_instruction = (
                 "\n[INSTRUCTION: This is an explicit adult scene. "
                 "You MUST use direct anatomical terms — pussy, cock, anus, clit, ass — exactly as written. "
-                "These are REQUIRED words, not optional. Do not replace them with 'sex', 'crevice', 'core', "
-                "'womanhood', 'manhood', or any other euphemism or metaphor. "
+                "Do not replace them with euphemisms like 'womanhood', 'manhood', 'core', or 'sex'. "
                 "If the user said 'pussy', write 'pussy' every time. "
-                + undress_clause_t3 +
-                "Always state the character's age as a specific number. "
-                "Describe body parts, positions, and physical actions with blunt, specific language. "
-                "Every anatomical detail must be stated plainly — no softening, no implying, no cutting away.]"
+                "\n\nSCOPE HARD LIMIT — THIS IS ABSOLUTE: "
+                "You may ONLY describe what the user explicitly wrote. "
+                "Do NOT add any sexual acts, nudity, or body part exposure the user did not state. "
+                "The user's words are the ceiling — you cannot go above them. "
+                "If they asked for undressing only, describe only the undressing. "
+                "If they asked for one garment removed, remove only that garment. "
+                "Do NOT continue to the next logical step. Do NOT improvise what comes next. "
+                "The scene ends exactly where the user's request ends. Hard stop. "
+                "\n\nUNDRESSING — if the subject starts clothed: go garment by garment as written. "
+                "Name each garment, describe how it is removed, describe what is revealed. "
+                "Camera lingers on each reveal. Do not compress or skip. "
+                "Always state character age as a specific number.]"
             )
         elif is_sensual:
-            # ── Tier 2: nudity/undressing implied — sensual but not pornographic ─
-
-            # Detect flash/titty-drop specifically
-            import re as _re2
-            _flash_re = _re2.compile(
-                r"\b(titty\s+drop|titties\s+out|"
-                r"flash\w*\s+(her|his)?\s*(tits|titties|boobs|breasts)|"
-                r"lift\w*\s+(her|his)?\s*(top|shirt)|"
-                r"show\w*\s+(her|his)?\s*(tits|titties|boobs))\b",
-                _re2.IGNORECASE
-            )
-            is_flash = bool(_flash_re.search(user_input))
-
-            if is_flash:
+            if has_undressing:
                 undress_clause = (
-                    "TITTY DROP / FLASH SEGMENT — THIS IS THE ENTIRE SCENE. DO NOT ADD ANYTHING ELSE. "
-                    "Write ONLY these movements in this exact order: "
-                    "1. Her hands reach for the hem of her top or the cups of her bra — describe her grip, her fingers on the fabric. "
-                    "2. She lifts her top upward slowly, or pulls her bra cups downward — describe the fabric moving, the resistance, the motion. "
-                    "3. Her bare breasts are released and fall free under gravity — describe the weight, the natural drop, the shape, the skin, the nipples. The camera holds on this. "
-                    "4. She holds the pose. Camera stays on her bare chest. "
-                    "STRICT LIMITS: Do NOT add sexual acts. Do NOT describe genitals. Do NOT escalate beyond the breast reveal. "
-                    "This is a slow, deliberate, sensual moment — not pornographic. Just the lift, the drop, the reveal. Nothing more. "
-                )
-            elif has_undressing:
-                undress_clause = (
-                    "UNDRESSING SEGMENT — MANDATORY: The prompt involves clothing removal or nudity. "
-                    "Write a dedicated undressing segment as its own narrative beat — garment by garment, "
-                    "describing how each is removed and what is physically revealed at each step. "
-                    "The camera lingers on each reveal. Do not skip or compress. "
-                    "Describing bare skin, curves, and the naked body is appropriate and expected. "
+                    f"\n\nUNDRESSING SCOPE — ABSOLUTE HARD LIMIT: "
+                    f"The user named ONLY these garments: {garment_list}. "
+                    f"You may ONLY describe the removal of THOSE specific items — nothing else. "
+                    f"Removing ANY other garment — even if it feels like the logical next step — is a scope violation. "
+                    f"Do NOT go from a shirt to a bra unless the user said bra. "
+                    f"Do NOT go from a bra to topless nudity unless the user said nude or naked or topless. "
+                    f"Do NOT go from clothing to underwear unless the user said underwear. "
+                    f"Do NOT go from underwear to nudity unless the user said nude or naked. "
+                    f"The named garments are the ceiling — you stop there, no matter what the style preset is. "
+                    f"Each garment removal is one beat: name it, describe how it comes off, describe what skin is revealed. "
+                    f"Camera lingers on the reveal. Then STOP. "
+                    f"Bare skin and curves may be described naturally — but genitals are never described or zoomed in on."
                 )
             else:
-                undress_clause = ""
+                undress_clause = (
+                    "\n\nNO UNDRESSING: The user has not asked for any clothing removal. "
+                    "Do NOT have the subject remove, loosen, or adjust any clothing in a sexualised way. "
+                    "Do NOT describe underwear, bare skin below the neck, or any implied nudity. "
+                    "Keep the scene exactly at the level of sensuality the user described — no further."
+                )
             explicit_instruction = (
-                "\n[INSTRUCTION: This scene involves nudity or sensual content. "
-                "Describing the bare body naturally is appropriate — skin, curves, flesh, nakedness. "
-                "However, do NOT zoom in on or explicitly describe genitals. "
-                "Do NOT introduce sexual acts the user did not ask for. "
-                "Do NOT self-escalate beyond what the user described. "
-                "Keep the tone sensual and cinematic — not pornographic. "
-                "Always state the character's age as a specific number. "
-                "HARD STOP RULES — CANNOT BE OVERRIDDEN: "
-                "Flash or top lift = reveal breasts ONLY. Do NOT pull down jeans, trousers or underwear. Do NOT describe buttocks or genitals. "
-                "Lap dance = dancing and grinding ONLY. Do NOT strip clothing. Do NOT expose nipples or genitals. "
-                "Stop the moment the requested action is complete. Add nothing further. "
+                "\n[INSTRUCTION: This scene involves sensual or intimate content. "
+                "Tone: warm, cinematic, tasteful. Bare skin above the waist may be described naturally where the user asked for it. "
+                "SCOPE HARD LIMIT — THIS IS ABSOLUTE: "
+                "Describe ONLY what the user asked for. Do NOT self-escalate under any circumstances. "
+                "Do NOT invent undressing, nudity, or intimate acts the user did not write. "
+                "The style preset sets the aesthetic — it does NOT give permission to add content beyond the user's request. "
+                "Always state character age as a specific number. "
                 + undress_clause + "]"
             )
         else:
-            # ── Tier 1: neutral — just enforce age rule ──────────────────────
             explicit_instruction = (
-                "\n[INSTRUCTION: Always state the character's age as a specific number, "
-                "e.g. 'a 34-year-old man' — never omit or approximate it.]"
+                "\n[INSTRUCTION: Write a full cinematic video prompt covering: "
+                "(1) video style and genre, "
+                "(2) shot type and camera angle with lens specs, "
+                "(3) character — age as a specific number e.g. 'a 34-year-old woman' — never omit, plus appearance, clothing, expression, "
+                "(4) scene — location, lighting, colour, atmosphere, "
+                "(5) action — continuous present-tense movement from start to finish, "
+                "(6) camera movement as prose, not bracketed directions, "
+                "(7) ambient sound woven naturally into the prose.]"
             )
 
-
-        # --- Sequence detection ---
-        # If the user wrote numbered steps (1. 2. 3. etc), detect them and inject
-        # an instruction to follow that exact order — no reordering, no skipping.
-        _sequence_re = re.compile(
-            r"^\s*(\d+[\.\):])\s+.+", re.MULTILINE
-        )
+        # ── Sequence detection ────────────────────────────────────────────────
+        _sequence_re = re.compile(r"^\s*(\d+[\.\):])\s+.+", re.MULTILINE)
         sequence_steps = _sequence_re.findall(user_input)
         if len(sequence_steps) >= 2:
             step_count = len(sequence_steps)
@@ -804,21 +1034,14 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
         else:
             sequence_instruction = ""
 
-        # --- Person detection ---
-        # If the input contains no reference to a person, inject an instruction
-        # telling the model to write a pure scene — no invented characters.
-        # NOTE: 'nobody' and 'model' intentionally excluded —
-        #   'nobody' means no person; 'model' false-positives on 'LTX model' etc.
+        # ── Person detection ──────────────────────────────────────────────────
         _person_re = re.compile(
             r"\b(he|she|his|her|him|they|them|their|man|men|woman|women|girl|girls|boy|boys|guy|guys|"
-            r"person|people|couple|figure|character|actress|actor|"
-            r"someone|anybody|stranger|friend|lover|wife|husband|partner|spouse|"
-            r"boyfriend|girlfriend|teenager|teenagers|adult|adults|female|male|"
-            r"blonde|brunette|redhead|nude|naked|"
-            r"singer|dancer|performer|athlete|soldier|worker|"
-            r"player|nurse|doctor|student|teacher|child|children|kid|kids|"
-            r"crowd|audience|escort|mistress|dominatrix|sub|submissive|"
-            r"friends|friend|group|gang|party|crew|team|pair|duo)\b",
+            r"person|people|couple|figure|character|model|actress|actor|"
+            r"someone|anybody|nobody|stranger|friend|lover|wife|husband|"
+            r"boyfriend|girlfriend|teenager|teenagers|adult|adults|female|male|blonde|brunette|"
+            r"redhead|nude|naked|singer|dancer|performer|athlete|soldier|worker|"
+            r"player|nurse|doctor|student|teacher|child|children|kid|kids|crowd|audience)\b",
             re.IGNORECASE,
         )
         has_person = bool(_person_re.search(user_input + " " + scene_context))
@@ -829,18 +1052,14 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
                 "This is a pure environment or object scene. Write only what the user described — "
                 "the setting, objects, light, atmosphere, and motion of non-human elements. "
                 "No characters. No 'someone', no 'a figure', no implied human presence of any kind. "
-                "No dialogue, no whispers, no voices. Sound is limited to the environment only — "
-                "wind, rain, fire, machinery, animals, ambient room tone. Nothing with a human source.]"
+                "No dialogue, no whispers, no voices. Sound is limited to the environment only.]"
             )
         else:
             no_person_instruction = ""
 
-        # --- Multi-subject detection ---
-        # If the input describes two or more people, inject a spatial instruction
-        # so the model tracks who is doing what and where they are relative to
-        # each other and the camera — otherwise it tends to lose track.
+        # ── Multi-subject detection ───────────────────────────────────────────
         _multi_re = re.compile(
-            r"\b(two\s+(women|men|people|girls|guys|characters|figures)|"
+            r"\b(two\s+(women|men|people|girls|guys|characters|figures|friends|strangers|colleagues|lovers|siblings|brothers|sisters)|"
             r"both\s+(of\s+them|women|men|girls|guys)|"
             r"(she|he)\s+and\s+(she|he|her|him)|"
             r"(a\s+man\s+and\s+a\s+woman|a\s+woman\s+and\s+a\s+man)|"
@@ -861,21 +1080,26 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
         else:
             multi_instruction = ""
 
-        # --- Dialogue instruction ---
-        # If there's no person in the scene, skip dialogue entirely regardless
-        # of the invent_dialogue toggle — a voiceless environment can't speak.
+        # ── Dialogue instruction ──────────────────────────────────────────────
         if not has_person:
-            dialogue_instruction = ""  # no_person_instruction already covers this
+            dialogue_instruction = ""
         elif invent_dialogue:
             dialogue_instruction = (
-                "\n\n[DIALOGUE INSTRUCTION: Invent dialogue that fits this scene naturally. "
-                "Write it as inline prose woven into the action — NOT as a [DIALOGUE: ...] tag or bracketed block. "
-                "The spoken words sit inside the sentence with attribution and physical delivery, like a novel. "
+                "\n\n[DIALOGUE INSTRUCTION — MANDATORY, CANNOT BE SKIPPED: "
+                "You MUST include at least one line of spoken dialogue in this scene. "
+                "An output with zero spoken words has failed this instruction. "
+                "Invent dialogue that sounds like something a real person would actually say in this exact situation — not a cliché. "
+                "Write it as inline prose woven into the action, with attribution and physical delivery, like a novel. "
+                "The spoken words sit inside the sentence — never as a floating quote, never as a [DIALOGUE: ...] tag. "
                 "Examples: "
-                "'He leans back, satisfied, \"I think I\\'ll have to go back tomorrow for more,\" he chuckles, his eyes crinkling at the corners.' "
                 "'\"Don\\'t stop,\" she breathes, gripping the sheets, her voice barely above a whisper.' "
-                "If the scene is sexual or explicit, dialogue must reflect that — breathless, reactive, commanding. "
-                "Never write a bare floating quote. Never use [DIALOGUE: ...] tags. Dialogue is part of the prose, always.]"
+                "'She glances back, \"Are you watching me?\" her tone half-amused, half-serious.' "
+                "'\"Come here,\" he says quietly, his hand extended.' "
+                "If the scene is sexual or explicit, dialogue must reflect that — breathless, reactive, direct. "
+                "Weave it into a physical beat — the character speaks while doing something, not in a static pause. "
+                "SOUND RULE: Maximum 2 ambient sounds active at any one time. "
+                "Only concrete physical sounds — footsteps, a door, rain, an engine, crowd noise. "
+                "No abstract emotional audio. No musical metaphors. No 'tension hums' or 'heartbeat of the city'.]"
             )
         else:
             has_user_dialogue = bool(re.search(r'["\u201c\u201d]', user_input))
@@ -884,30 +1108,25 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
                     "\n\n[DIALOGUE INSTRUCTION: Use ONLY the dialogue the user provided — do not invent or add any additional spoken words. "
                     "Place their exact words naturally in the scene as inline prose with attribution and delivery. "
                     "Examples: 'She smiles, \"I\\'m so happy,\" her voice bright, eyes wide.' "
-                    "'\"I\\'m so happy,\" he whispers, pulling her close, his voice low.' "
                     "Never use [DIALOGUE: ...] tags. Weave the words into the action as part of the prose.]"
                 )
             else:
                 dialogue_instruction = (
                     "\n\n[DIALOGUE INSTRUCTION: No dialogue in this scene. No spoken words. "
-                    "Weave ambient sound naturally into the prose instead — maximum 2 sounds active at any one time, "
-                    "woven in as descriptive prose, not as tags.]"
+                    "Weave ambient sound naturally into the prose instead — maximum 2 concrete physical sounds "
+                    "active at any one time, described as prose, not tags. "
+                    "Only sounds a microphone would physically pick up. No emotional or musical audio descriptions.]"
                 )
 
-        # Tell the model the token budget AND the hard action cap together
-        # so both constraints are visible in the same instruction block.
+        # ── Length instruction ────────────────────────────────────────────────
         length_instruction = (
-            f"\n[PACING — THIS IS MANDATORY: {pacing_hint} "
-            f"Write approximately {token_val} tokens total. "
-            f"Do not exceed the action count above under any circumstances. "
-            f"Do NOT write the token count, word count, action number, or any parenthetical summary, checklist, or compliance note at the end — "
-            f"the scene ends with the last sentence of prose. Nothing after it. No brackets. No notes. No confirmation.]"
+            f"\n[PACING: {pacing_hint} "
+            f"Aim for approximately {token_val} words of prose. "
+            f"Do not exceed the action count above. "
+            f"Output ends with the final sentence of the scene — no summaries, no counts, no notes, no brackets after the last word.]"
         )
 
-        # --- Merge vision context if provided ---
-        # When a scene_context is wired in from the Vision Describe node,
-        # prepend it so the LLM uses it as the authoritative subject/scene
-        # description rather than inventing one from scratch.
+        # ── Vision context ────────────────────────────────────────────────────
         if scene_context and scene_context.strip():
             effective_input = (
                 f"[SCENE CONTEXT FROM IMAGE — use this as the authoritative description "
@@ -919,112 +1138,149 @@ IMPORTANT: Output ONLY the expanded prompt. Do NOT include preamble, commentary,
         else:
             effective_input = user_input.strip()
 
-        # --- LoRA trigger injection ---
-        # If the user provided trigger words, inject them as a hard instruction
-        # so they appear at the start of the final prompt and are never buried.
+        # ── LoRA triggers ─────────────────────────────────────────────────────
         if lora_triggers and lora_triggers.strip():
-            lora_instruction = (
-                f"\n[LORA INSTRUCTION: You MUST begin the prompt output with these exact trigger words "
-                f"before anything else: {lora_triggers.strip()} — place them as the very first words of your output, "
-                f"then continue with the scene description immediately after.]"
-            )
+            if style_label:
+                lora_instruction = (
+                    f"\n[LORA INSTRUCTION: You MUST begin the prompt output with these exact trigger words "
+                    f"before anything else: {lora_triggers.strip()} — then immediately follow with \"{style_label}\" "
+                    f"then continue with the scene description.]"
+                )
+            else:
+                lora_instruction = (
+                    f"\n[LORA INSTRUCTION: You MUST begin the prompt output with these exact trigger words "
+                    f"before anything else: {lora_triggers.strip()} — place them as the very first words of your output, "
+                    f"then continue with the scene description immediately after.]"
+                )
         else:
             lora_instruction = ""
 
-        # --- Static camera detection ---
-        # If the user explicitly asks for a static/locked-off/fixed shot,
-        # inject a hard instruction to prevent the LLM inventing camera movement.
-        _static_re = re.compile(
-            r"\b(static|locked.off|locked off|fixed|stationary|no camera movement|"
-            r"camera still|still camera|camera locked|tripod shot|tripod|"
-            r"fixed camera|fixed shot|static shot|static camera)\b",
-            re.IGNORECASE,
-        )
-        if _static_re.search(user_input):
-            camera_instruction = (
-                "\n[CAMERA INSTRUCTION — MANDATORY: This is a static, locked-off shot. "
-                "The camera does NOT move at all — no push, no pull, no pan, no tilt, no drift, no zoom. "
-                "The lens is completely fixed for the entire clip. "
-                "All motion in the scene comes from the subject only. "
-                "Do not describe any camera movement whatsoever. "
-                "Do not write phrases like 'the camera tilts', 'the shot pulls back', 'the lens drifts'. "
-                "The frame is still. Only what is inside it moves.]"
-            )
-        else:
-            camera_instruction = ""
-
-        # --- Build messages ---
+        # ── Build messages ────────────────────────────────────────────────────
         messages = [
             {"role": "system", "content": self.SYSTEM_PROMPT},
-            {"role": "user",   "content": effective_input + sequence_instruction + no_person_instruction + multi_instruction + dialogue_instruction + explicit_instruction + lora_instruction + camera_instruction + length_instruction},
+            {"role": "user",   "content": (
+                effective_input
+                + style_instruction
+                + portrait_instruction
+                + sequence_instruction
+                + no_person_instruction
+                + multi_instruction
+                + dialogue_instruction
+                + explicit_instruction
+                + lora_instruction
+                + length_instruction
+            )},
         ]
 
-        # apply_chat_template returns different types depending on the
-        # transformers version and tokenizer implementation:
-        #   - Plain tensor          (older transformers, most common)
-        #   - BatchEncoding object  (newer transformers 4.43+, has .input_ids)
-        #   - Plain dict            (some tokenizer variants)
-        #   - Plain Python list     (some versions ignore return_tensors entirely)
-        # We normalise all four cases into a plain LongTensor before calling .shape.
         raw = self.tokenizer.apply_chat_template(
             messages,
             return_tensors="pt",
             add_generation_prompt=True,
-            enable_thinking=False if is_qwen3 else None,
         )
         if hasattr(raw, "input_ids"):
-            # BatchEncoding object (transformers 4.43+)
             input_ids = raw.input_ids.to(self.model.device)
         elif isinstance(raw, dict):
-            # Plain dict with input_ids key
             input_ids = raw["input_ids"].to(self.model.device)
         elif isinstance(raw, list):
-            # return_tensors was ignored — wrap flat list into tensor
             input_ids = torch.tensor([raw], dtype=torch.long).to(self.model.device)
         else:
-            # Already a plain tensor — normal case
             input_ids = raw.to(self.model.device)
 
         input_length = input_ids.shape[1]
 
-        with torch.no_grad():
-            output_ids = self.model.generate(
-                input_ids,
-                min_new_tokens=min_tokens,
-                max_new_tokens=max_tokens_actual,
-                temperature=temperature,
-                do_sample=True,
-                top_k=40,
-                top_p=0.9,
-                repetition_penalty=1.07,
-                use_cache=True,
-                pad_token_id=self.tokenizer.eos_token_id,
-                eos_token_id=stop_token_ids,   # hard-stop on ANY delimiter
-            )
+        # ── Generation — wrapped so cancelled runs always unload ──────────────
+        try:
+            with torch.no_grad():
+                output_ids = self.model.generate(
+                    input_ids,
+                    min_new_tokens=min_tokens,
+                    max_new_tokens=max_tokens_actual,
+                    temperature=temperature,
+                    do_sample=True,
+                    top_k=40,
+                    top_p=0.9,
+                    repetition_penalty=1.07,
+                    use_cache=True,
+                    pad_token_id=self.tokenizer.eos_token_id,
+                    eos_token_id=stop_token_ids,
+                )
+        except Exception as _gen_exc:
+            # Generation cancelled or errored — unload immediately so next run
+            # doesn't find a half-dead model occupying VRAM
+            print(f"[LTX2] Generation interrupted: {_gen_exc}")
+            print("[LTX2] Forcing unload due to interrupted generation.")
+            self.unload_model()
+            raise
 
-        # Slice ONLY newly generated tokens
         generated_tokens = output_ids[0][input_length:]
-
-        result = self.tokenizer.decode(
-            generated_tokens,
-            skip_special_tokens=True,
-        ).strip()
+        result = self.tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
 
         del output_ids
         del input_ids
 
-        # Regex clean as a last-resort safety net (should rarely trigger now)
         result = self._clean_output(result)
-        # Strip any lone trailing bracket left by model
-        result = re.sub(r'\s*[\(\[]\s*$', '', result).strip()
 
-        # --- Build negative prompt ---
-        neg_prompt = _build_negative_prompt(result, user_input)
+        # ── Style label safety net ────────────────────────────────────────────
+        # If the LLM forgot to open with the style label, prepend it now
+        # so LTX-2's text encoder always sees the render style
+        if style_label and not result.lower().startswith(style_label.split()[0].lower()):
+            result = style_label + " " + result
+            print(f"[LTX2] Style label prepended (LLM omitted it): {style_label}")
+
+        neg_prompt = _build_negative_prompt(
+            result, user_input,
+            is_portrait=self._last_portrait,
+            style_preset=self._last_style,
+        )
+
+        # ── Prompt history ────────────────────────────────────────────────────
+        # Saves last 20 runs to prompt_history.json next to this script
+        # Also builds a HISTORY string for the output pin (last 5 runs)
+        history_string = ""
+        try:
+            _hist_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompt_history.json")
+            _history = []
+            _first_save = not os.path.exists(_hist_path)
+            if not _first_save:
+                with open(_hist_path, "r", encoding="utf-8") as _f:
+                    _history = json.load(_f)
+            _history.insert(0, {
+                "timestamp": _time.strftime("%Y-%m-%d %H:%M:%S"),
+                "style":     style_preset,
+                "portrait":  is_portrait,
+                "input":     user_input[:300],
+                "output":    result[:800],
+            })
+            _history = _history[:20]
+            with open(_hist_path, "w", encoding="utf-8") as _f:
+                json.dump(_history, _f, indent=2, ensure_ascii=False)
+
+            if _first_save:
+                print(f"[LTX2] Prompt history file created at: {_hist_path}")
+            else:
+                print(f"[LTX2] Prompt history saved ({len(_history)} runs) → {_hist_path}")
+
+            # Build the HISTORY output pin — last 5 runs as readable text
+            lines = []
+            for i, entry in enumerate(_history[:5], 1):
+                lines.append(
+                    f"── Run {i}  [{entry['timestamp']}]  {entry['style']}\n"
+                    f"IN:  {entry['input'][:120]}\n"
+                    f"OUT: {entry['output'][:300]}"
+                )
+            history_string = "\n\n".join(lines)
+
+        except Exception as _he:
+            print(f"[LTX2] Prompt history save failed (non-fatal): {_he}")
+            history_string = f"[History unavailable: {_he}]"
 
         if not keep_model_loaded:
             self.unload_model()
 
-        return (result, result, neg_prompt)
+        fps = self.PRESET_FPS.get(style_preset, 24)
+        print(f"[LTX2] FPS output: {fps}  (preset: {style_preset})")
+
+        return (result, result, neg_prompt, fps, history_string)
 
 
 # ── ComfyUI boilerplate ──────────────────────────────────────────────────────
@@ -1042,7 +1298,6 @@ class LTX2UnloadModel:
     OUTPUT_NODE = True
 
     def unload(self):
-        # Walk all live LTX2PromptArchitect instances and unload them
         import gc
         unloaded = 0
         for obj in gc.get_objects():
@@ -1059,6 +1314,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "LTX2PromptArchitect": "LTX-2 Easy Prompt By LoRa-Daddy",
+    "LTX2PromptArchitect": "LTX-2.3 Easy Prompt By LoRa-Daddy",
     "LTX2UnloadModel":     "LTX2 Unload Model",
 }
