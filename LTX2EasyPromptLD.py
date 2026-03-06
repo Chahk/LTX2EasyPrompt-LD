@@ -447,7 +447,19 @@ THEN:
 9. Dialogue — follow the DIALOGUE INSTRUCTION exactly. Write as inline prose with attribution and physical delivery, like a novel. NEVER use [DIALOGUE: ...] tags. DIALOGUE IS REQUIRED when instructed — it is not optional.
 
 UNDRESSING RULE — mandatory when clothing removal is implied or stated:
-If the subject starts clothed and the scene involves nudity or stripping, dedicate a full narrative segment to the undressing BEFORE any nudity or explicit act. Name each garment, describe HOW it is removed, describe what is physically REVEALED at each step. Do NOT jump from clothed to naked.
+If the subject starts clothed and the scene involves nudity or stripping, dedicate a full narrative segment to the undressing BEFORE any nudity or explicit act. Name each garment, describe HOW it is removed step by step, describe what is physically REVEALED at each step. Do NOT jump from clothed to naked. Do NOT compress multiple steps into one sentence.
+
+GARMENT CHOREOGRAPHY — use the correct physical sequence for each type:
+- Shirt / t-shirt / crop top (full removal): fingers find and grip the hem at the waist → fabric gathered and pulled upward → shirt rises past the stomach → past the ribs → over the chest → pulled over the head and off the arms → discarded
+- Shirt / t-shirt / crop top (lift only — not removed): fingers find the hem at the waist → grip the fabric → slowly gather and lift → fabric rises past the stomach → past the navel → past the ribs → chest comes into view → breasts fully exposed → held there. Every step is its own sentence. Do NOT compress into one line.
+- Dress (pullover): hands grip the hem at the thighs → lifted up past the hips → past the waist → gathered over the chest → pulled over the head → falls away
+- Dress (zip): hand reaches behind to find the zip → zip pulled slowly downward → fabric loosens and parts → dress slipped off the shoulders → slides down the body → falls to the floor
+- Blouse / button-down: fingers work each button from top to bottom one at a time → fabric parts with each button → shrugged off the shoulders → slides down the arms → dropped
+- Bra: hand reaches behind to the clasp → clasp unhooked → straps slacken → straps slipped off each shoulder in turn → cups fall away → removed and set aside
+- Jeans / trousers: button popped → zip drawn down → waistband pushed down over the hips → fabric pushed down the thighs → stepped out of
+- Underwear / knickers / thong: thumbs hooked into the waistband at the hips → pushed down → stepped out of
+
+NO INVENTED RESOLUTION: Do NOT have the subject lower, cover, or reverse any action unless the user asked for it. If she lifts her shirt, it stays lifted for the duration of the scene. Do not write her pulling it back down, covering herself, or adjusting clothing unless explicitly requested.
 
 PORTRAIT MODE — if the scene is 9:16 vertical: frame everything vertically, tight head-to-torso shots, action moves vertically in frame, no wide horizontal compositions.
 
@@ -690,6 +702,10 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
         text = re.sub(r'\s+Hard stop\..*$', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
         text = re.sub(r'\.\s+\d+\s+tokens?\b.*$', '.', text, flags=re.DOTALL | re.IGNORECASE).strip()
         text = re.sub(r'\.\s+\d+\s+words?\b.*$', '.', text, flags=re.DOTALL | re.IGNORECASE).strip()
+        # Catch "The total duration of the scene is X seconds..." summary bleed
+        text = re.sub(r'\.?\s+The total duration of the scene.*$', '.', text, flags=re.DOTALL | re.IGNORECASE).strip()
+        text = re.sub(r'\.?\s+The (scene\'?s? )?total (duration|running time).*$', '.', text, flags=re.DOTALL | re.IGNORECASE).strip()
+        text = re.sub(r',?\s+with\s+(three|two|four|five|\d+)\s+distinct\s+actions.*$', '.', text, flags=re.DOTALL | re.IGNORECASE).strip()
         text = re.sub(r"\s*\(\d+\s+seconds?\)\s*$", "", text).strip()
         text = re.sub(r"\s*\(\d+:\d+\s*[-–]\s*\d+:\d+\)\s*", " ", text).strip()
         text = re.sub(r"\(The action takes up roughly[^\)]*\)", " ", text, flags=re.IGNORECASE).strip()
@@ -712,7 +728,9 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
 
         # Catch "The scene ends there" leaking mid-prose after a sentence
         text = re.sub(r'\.\s+The scene ends there[^.]*\.', '.', text, flags=re.IGNORECASE).strip()
-        text = re.sub(r',?\s+the scene ending[^.]*\.', '.', text, flags=re.IGNORECASE).strip()
+        text = re.sub(r',?\s+before the scene fades to black[^.]*\.', '.', text, flags=re.IGNORECASE).strip()
+        text = re.sub(r'\.?\s+[Tt]he scene fades to black[^.]*\.', '.', text, flags=re.IGNORECASE).strip()
+        text = re.sub(r',?\s+as the scene fades[^.]*\.', '.', text, flags=re.IGNORECASE).strip()
 
         # ── Repetition loop detection ─────────────────────────────────────────
         # Catches runaway "No more. No more. No more." style loops
@@ -925,6 +943,9 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
             r"(shirt|dress|top|bra|pants|jeans|clothes|clothing|outfit|underwear|skirt|jacket|coat|robe)|"
             r"disrobe\w*|unbutton\w*|unzip\w*|peels?\s+off|pulls?\s+off|"
             r"shed\w*\s+(her|his|their)?\s*(clothes|clothing|shirt|dress)|"
+            r"lift\w*\s+(her|his|their|the)?\s*(shirt|top|dress|skirt|crop|tee|t-shirt)|"
+            r"(shirt|top|dress|skirt|crop|tee|t-shirt)\s+(up|lifted|raised|hiked)|"
+            r"flash\w*\s+(her|his|their)?\s*(breasts?|chest|tits?|boobs?)|"
             r"sensual|erotic|intimate|lingerie|bare\s+skin|bare\s+body|"
             r"babydoll|nighty|nightie|negligee|corset|bodysuit|thong|g-string|"
             r"sheer|see-through|tease|teasing|seductive|seduce|"
@@ -936,13 +957,25 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
             r"removes?\s+(her|his|their|the)?\s*\w*\s*"
             r"(shirt|dress|top|bra|pants|jeans|clothes|clothing|outfit|underwear|skirt|jacket|coat|robe)|"
             r"disrobe\w*|unbutton\w*|unzip\w*|peels?\s+off|pulls?\s+off|"
-            r"shed\w*\s+(her|his|their)?\s*(clothes|clothing|shirt|dress))\b",
+            r"shed\w*\s+(her|his|their)?\s*(clothes|clothing|shirt|dress)|"
+            r"lift\w*\s+(her|his|their|the)?\s*(shirt|top|dress|skirt|crop|tee|t-shirt)|"
+            r"(shirt|top|dress|skirt|crop|tee|t-shirt)\s+(up|lifted|raised|hiked)|"
+            r"flash\w*\s+(her|his|their)?\s*(breasts?|chest|tits?|boobs?))\b",
+            re.IGNORECASE,
+        )
+        # Detect lift/flash specifically — partial reveal, not full removal
+        _lift_re = re.compile(
+            r"\b(lift\w*\s+(her|his|their|the)?\s*(shirt|top|dress|skirt|crop|tee|t-shirt)|"
+            r"(shirt|top|dress|skirt|crop|tee|t-shirt)\s+(up|lifted|raised|hiked)|"
+            r"flash\w*\s+(her|his|their)?\s*(breasts?|chest|tits?|boobs?)|"
+            r"hik\w*\s+(her|his|their|the)?\s*(shirt|top|skirt|dress))\b",
             re.IGNORECASE,
         )
 
         is_explicit    = bool(_explicit_re.search(user_input))
         is_sensual     = bool(_sensual_re.search(user_input)) and not is_explicit
         has_undressing = bool(_undress_re.search(user_input))
+        has_lift       = bool(_lift_re.search(user_input))
 
         # ── Detect exactly which garments the user named ──────────────────────
         _garment_re = re.compile(
@@ -970,9 +1003,17 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
                 "If they asked for one garment removed, remove only that garment. "
                 "Do NOT continue to the next logical step. Do NOT improvise what comes next. "
                 "The scene ends exactly where the user's request ends. Hard stop. "
-                "\n\nUNDRESSING — if the subject starts clothed: go garment by garment as written. "
-                "Name each garment, describe how it is removed, describe what is revealed. "
-                "Camera lingers on each reveal. Do not compress or skip. "
+                "\n\nUNDRESSING — if the subject starts clothed, use the correct physical sequence for each garment: "
+                "Shirt/t-shirt/crop top: grip the hem → lift past stomach → past ribs → over chest → over head → off arms. "
+                "SHIRT LIFT (partial — not full removal): fingers find the hem at the waist → grip the fabric → slowly gather and lift → fabric rises past the stomach → past the navel → past the ribs → chest comes into view → breasts fully exposed → held there. Each of these is its own sentence. Do NOT compress into one line. "
+                "Dress (zip): find the zip → pull it down slowly → fabric parts → slipped off shoulders → slides down → falls. "
+                "Dress (pullover): grip hem at thighs → lift past hips → past waist → over chest → over head. "
+                "Blouse/button-down: work each button one at a time → fabric parts → shrug off shoulders → slides down arms. "
+                "Bra: reach behind to clasp → unhook → straps off each shoulder → cups fall away. "
+                "Jeans/trousers: button popped → zip down → pushed over hips → down the thighs → stepped out of. "
+                "Underwear: thumbs into waistband → pushed down → stepped out of. "
+                "Each step is its own sentence. Camera lingers on each reveal. Do not compress or skip any step. "
+                "NO INVENTED RESOLUTION: Do NOT have the subject lower, cover, or reverse any action unless the user asked for it. If she lifts her shirt, it stays lifted. Do not write her pulling it back down. "
                 "Always state character age as a specific number.]"
             )
         elif is_sensual:
@@ -987,8 +1028,17 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
                     f"Do NOT go from clothing to underwear unless the user said underwear. "
                     f"Do NOT go from underwear to nudity unless the user said nude or naked. "
                     f"The named garments are the ceiling — you stop there, no matter what the style preset is. "
-                    f"Each garment removal is one beat: name it, describe how it comes off, describe what skin is revealed. "
-                    f"Camera lingers on the reveal. Then STOP. "
+                    f"\n\nFor each named garment use the correct physical sequence — every step its own sentence: "
+                    f"Shirt/t-shirt/crop top (full removal): fingers grip the hem at the waist → fabric lifted past the stomach → past the ribs → over the chest → pulled over the head → off the arms. "
+                    f"SHIRT LIFT (partial — not removed): fingers find the hem → grip the fabric → slowly gather and lift → fabric rises past the stomach → past the navel → past the ribs → chest and breasts come into view → held there. Every step is its own sentence. Do NOT compress into one line. "
+                    f"Dress (zip): hand finds the zip → pulled slowly down → fabric loosens and parts → slipped off shoulders → slides down the body → falls. "
+                    f"Dress (pullover): hands grip hem at thighs → lifted past hips → past waist → gathered over chest → pulled over head. "
+                    f"Blouse/button-down: each button worked one at a time → fabric parts → shrugged off shoulders → slides down arms. "
+                    f"Bra: hand reaches behind to clasp → unhooked → straps off each shoulder in turn → cups fall away. "
+                    f"Jeans/trousers: button popped → zip drawn down → pushed over hips → down the thighs → stepped out of. "
+                    f"Underwear: thumbs hooked into waistband → pushed down → stepped out of. "
+                    f"Camera lingers on each reveal. Then STOP after the last named garment. "
+                    f"NO INVENTED RESOLUTION: Do NOT have the subject lower, cover, or reverse any action unless the user explicitly asked for it. "
                     f"Bare skin and curves may be described naturally — but genitals are never described or zoomed in on."
                 )
             else:
@@ -1126,6 +1176,27 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
             f"Output ends with the final sentence of the scene — no summaries, no counts, no notes, no brackets after the last word.]"
         )
 
+        # ── Lift / flash instruction — fires when a shirt lift or flash is detected ──
+        if has_lift:
+            lift_instruction = (
+                "\n\n[SHIRT LIFT INSTRUCTION — THIS OVERRIDES ALL OTHER UNDRESSING GUIDANCE FOR THIS ACTION: "
+                "The user has described a shirt, top, or crop top being lifted. "
+                "You MUST write this as a sequence of separate sentences — one sentence per step. "
+                "DO NOT compress the lift into a single sentence. DO NOT write 'she lifts her shirt, revealing her breasts' as one line. "
+                "MANDATORY SEQUENCE — write each of these as its own sentence in the output:\n"
+                "1. Her fingers find the hem of her shirt at the waist.\n"
+                "2. She grips the fabric and begins to gather it upward.\n"
+                "3. The shirt rises slowly past her stomach.\n"
+                "4. The fabric passes her navel, exposing her bare midriff.\n"
+                "5. The shirt climbs past her ribs.\n"
+                "6. Her chest comes into view as the fabric rises higher.\n"
+                "7. Her breasts are fully exposed, the shirt held up.\n"
+                "The shirt STAYS LIFTED for the remainder of the scene. "
+                "Do NOT write her lowering it, covering herself, or adjusting the shirt unless the user explicitly asked for that.]"
+            )
+        else:
+            lift_instruction = ""
+
         # ── Vision context ────────────────────────────────────────────────────
         if scene_context and scene_context.strip():
             effective_input = (
@@ -1167,6 +1238,7 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
                 + multi_instruction
                 + dialogue_instruction
                 + explicit_instruction
+                + lift_instruction
                 + lora_instruction
                 + length_instruction
             )},
