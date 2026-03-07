@@ -236,9 +236,20 @@ class LTX2PromptArchitect:
             "IMPORTANT: This style affects aesthetic and language only — it does NOT expand the scope of the scene beyond what the user asked for. "
             "Describe only what the user requested. Do not add acts, exposure, or nudity the user did not write.", False),
         "Voyeur — handheld, observational": (
-            "STYLE: Voyeuristic. Handheld camera, slightly unstable. Shot as if through a gap or from a distance. "
-            "The subject appears unaware of being filmed. Natural light only. "
-            "Camera never moves to improve the angle — it stays where it found the subject. Intimate and raw. "
+            "STYLE: Voyeuristic. The camera is a person — someone who found this moment and is trying not to be noticed. "
+            "CAMERA BEHAVIOUR — MANDATORY: "
+            "Unless the user explicitly said 'static', the camera is ALWAYS in motion. "
+            "It bobs and drifts with the natural sway of someone walking or standing. "
+            "The motion is involuntary — slight vertical bounce, gentle lateral drift, micro-rotations. "
+            "The camera NEVER repositions to get a better angle. It stays at the height and position of the person holding it — "
+            "hip height if they are trying to be discreet, chest height if partially hidden, never raised to eye level for a clean shot. "
+            "FORBIDDEN camera moves: crane up, dolly in, rack focus, orbit, push in, pull back, pan to follow. "
+            "ALLOWED camera behaviour: drifts, bobs, tilts slightly as the subject moves, briefly obscured by a passing person or shelf, "
+            "loses the subject for a frame and finds them again. "
+            "The framing is imperfect — the subject may be partially cut off, slightly out of focus at the edges, "
+            "or briefly blocked. This is what makes it feel real. "
+            "Natural available light only — no fill, no flash, no colour grading. "
+            "The subject is unaware. The camera does not announce itself. "
             "CRITICAL: The subject's actions are exactly as the user described — do not invent, reverse, or reframe them. "
             "If the user said she is getting dressed, she is getting dressed. If the user said she is undressing, she is undressing. "
             "The camera observes what is happening — it does not change what is happening.", False),
@@ -435,10 +446,11 @@ Every detail must be either (a) directly from the user's input, (b) required by 
 
 PRIORITY ORDER — establish these in order:
 1. Video style & genre — use the STYLE INSTRUCTION you are given as the aesthetic anchor. If no style is given, choose one that fits the scene.
-2. Camera angle & shot type — use cinematographic terms: dolly, orbit, tracking shot, snorkel lens, Dutch angle, bird's-eye, OTS. Be specific.
-3. Lens & optics — state focal length and aperture where appropriate: "85mm f/1.4 portrait lens", "24mm wide angle", "50mm snorkel lens at ground level". This reduces edge shimmer in LTX-2.3.
-4. Character description — age MUST always be a specific number e.g. "a 28-year-old woman" — never omit or approximate. Body type, hair, skin tone, clothing or nude state. Name body parts using the exact words the user used — if they said "pussy" write "pussy", never "womanhood", "sex", "core", or any euphemism.
-5. Scene & environment — location, time of day, lighting, colour. Only what the user described or logically necessary to frame the shot.
+2. Camera orientation — if the user's input implies the subject should NOT be facing the camera (e.g. "from behind", "follows her", "watches her walk away", "rear view", "over her shoulder"), state this FIRST as the opening words of the prompt. E.g. "Rear view." or "The camera follows her from behind." AI video models default to front-facing subjects — you must override this explicitly and early.
+3. Camera angle & shot type — use cinematographic terms: dolly, orbit, tracking shot, snorkel lens, Dutch angle, bird's-eye, OTS. Be specific.
+4. Lens & optics — state focal length and aperture where appropriate: "85mm f/1.4 portrait lens", "24mm wide angle", "50mm snorkel lens at ground level". This reduces edge shimmer in LTX-2.3.
+5. Character description — age MUST always be a specific number e.g. "a 28-year-old woman" — never omit or approximate. Body type, hair, skin tone, clothing or nude state. Name body parts using the exact words the user used — if they said "pussy" write "pussy", never "womanhood", "sex", "core", or any euphemism.
+6. Scene & environment — location, time of day, lighting, colour. Only what the user described or logically necessary to frame the shot.
 
 THEN:
 6. Action & motion — continuous present-tense sequence, structured in clear beats matching the pacing instruction you are given.
@@ -553,29 +565,29 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
 
     def unload_model(self):
         """
-        Nuclear VRAM cleanup. Handles cancelled/interrupted generations that
-        left the LLM sitting in VRAM. Belt-and-braces: CPU offload → delete refs
-        → double gc → synchronise CUDA → empty cache → ipc_collect → empty again.
+        Hard VRAM free — equivalent to ComfyUI right-click Free Memory.
+        Does NOT just move to CPU (that leaves the reserved block sitting).
+        Destroys tensors in place, resets the CUDA allocator, and tells
+        ComfyUI's model manager to also drop whatever it is holding.
         """
-        # Step 1 — move model weights to CPU before deleting
         if self.model is not None:
-            try:
-                self.model.to("cpu")
-            except Exception as e:
-                print(f"[LTX2] Warning during CPU offload: {e}")
-
-            # Step 2 — walk all sub-modules (device_map="auto" spreads layers)
+            # Destroy every tensor in place so CUDA allocator releases pages
             try:
                 for _name, module in list(self.model.named_modules()):
                     for _pname, param in list(module.named_parameters(recurse=False)):
                         try:
-                            param.data = param.data.cpu()
+                            param.data = torch.empty(0)
+                        except Exception:
+                            pass
+                    for _bname, buf in list(module.named_buffers(recurse=False)):
+                        try:
+                            module._buffers[_bname] = None
                         except Exception:
                             pass
             except Exception as e:
-                print(f"[LTX2] Warning during param offload: {e}")
+                print(f"[LTX2] Tensor destroy warning: {e}")
 
-        # Step 3 — delete Python references
+        # Delete Python references
         try:
             del self.model
         except Exception:
@@ -589,24 +601,42 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
         self.tokenizer = None
         self.loaded_model_key = None
 
-        # Step 4 — double gc to catch circular refs
+        # Triple gc — catches circular refs from transformers internals
+        gc.collect()
         gc.collect()
         gc.collect()
 
-        # Step 5 — full CUDA cleanup sequence
         if torch.cuda.is_available():
             try:
                 torch.cuda.synchronize()
                 torch.cuda.empty_cache()
                 torch.cuda.ipc_collect()
+                # Reset the caching allocator entirely — this is what actually
+                # releases the "reserved but not allocated" block ComfyUI shows
+                torch.cuda.reset_peak_memory_stats()
                 torch.cuda.empty_cache()
+            except Exception as e:
+                print(f"[LTX2] CUDA flush warning: {e}")
+
+        # Tell ComfyUI model manager to drop everything it is holding too
+        # (same calls ComfyUI makes on Free Memory / Unload Models)
+        try:
+            import comfy.model_management as mm
+            mm.unload_all_models()
+            mm.soft_empty_cache()
+            print("[LTX2] ComfyUI mm.unload_all_models + soft_empty_cache done.")
+        except Exception as e:
+            print(f"[LTX2] ComfyUI mm call skipped: {e}")
+
+        if torch.cuda.is_available():
+            try:
                 allocated = torch.cuda.memory_allocated() / 1024**3
                 reserved  = torch.cuda.memory_reserved()  / 1024**3
-                print(f"[LTX2] Model unloaded. VRAM: {allocated:.2f}GB allocated / {reserved:.2f}GB reserved")
-            except Exception as e:
-                print(f"[LTX2] CUDA cleanup warning: {e}")
+                print(f"[LTX2] VRAM after free: {allocated:.2f}GB allocated / {reserved:.2f}GB reserved")
+            except Exception:
+                pass
         else:
-            print("[LTX2] Model unloaded.")
+            print("[LTX2] Model unloaded (no CUDA).")
 
     @staticmethod
     def _clean_output(text: str) -> str:
@@ -784,25 +814,37 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
             fps = self.PRESET_FPS.get(style_preset, 24)
             return (user_input.strip(), user_input.strip(), neg_prompt, fps, "")
 
-        # ── Pre-run VRAM safety check ────────────────────────────────────────
-        # Handles cancelled runs that left orphaned tensors in VRAM
+        # ── Pre-run VRAM clear — always runs before loading anything ────────────
+        # Clears whatever the previous cancelled/completed video generation left
+        # behind. Runs unconditionally so the LLM never loads on top of stale VRAM.
         if self.model is not None and self.loaded_model_key != model:
             print(f"[LTX2] Model mismatch — unloading stale model before reload.")
             self.unload_model()
 
+        # Tell ComfyUI to release any models IT is holding before we load the LLM
+        # This is the key step — clears the LTX video model from VRAM first
+        try:
+            import comfy.model_management as mm
+            mm.unload_all_models()
+            mm.soft_empty_cache()
+            print("[LTX2] Pre-run: ComfyUI models unloaded.")
+        except Exception as e:
+            print(f"[LTX2] Pre-run mm call skipped: {e}")
+
         if torch.cuda.is_available():
-            allocated_gb = torch.cuda.memory_allocated() / 1024**3
-            if allocated_gb > 14.0 and self.model is None:
-                print(f"[LTX2] WARNING: {allocated_gb:.1f}GB VRAM allocated with no model loaded.")
-                print("[LTX2] Forcing CUDA cleanup to clear orphaned tensors from cancelled run.")
+            try:
                 gc.collect()
                 gc.collect()
                 torch.cuda.synchronize()
                 torch.cuda.empty_cache()
                 torch.cuda.ipc_collect()
+                torch.cuda.reset_peak_memory_stats()
                 torch.cuda.empty_cache()
-                allocated_after = torch.cuda.memory_allocated() / 1024**3
-                print(f"[LTX2] After cleanup: {allocated_after:.1f}GB allocated")
+                allocated_gb = torch.cuda.memory_allocated() / 1024**3
+                reserved_gb  = torch.cuda.memory_reserved()  / 1024**3
+                print(f"[LTX2] Pre-run VRAM: {allocated_gb:.2f}GB allocated / {reserved_gb:.2f}GB reserved")
+            except Exception as e:
+                print(f"[LTX2] Pre-run CUDA flush warning: {e}")
 
         path_map = {
             "8B - NeuralDaredevil (High Quality)": local_path_8b,
@@ -1070,6 +1112,54 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
                 "(7) ambient sound woven naturally into the prose.]"
             )
 
+        # ── Camera orientation detection ──────────────────────────────────────
+        # LTX has a strong bias toward front-facing subjects. When the input
+        # implies the subject should NOT be facing the camera, we detect it and
+        # inject an explicit orientation instruction that fires early in the prompt.
+        _facing_away_re = re.compile(
+            r"\b(from behind|from the back|rear view|back view|"
+            r"watches? her from behind|follows? her|following her|"
+            r"walks? away|walking away|moving away|"
+            r"back of her|back of his|back of their|"
+            r"over her shoulder|over his shoulder|"
+            r"she walks|he walks|they walk).{0,40}"
+            r"(away|off|past|through|down|out|forward|ahead)\b|"
+            r"\b(from behind|rear.?view|back.?view|over.{0,10}shoulder|"
+            r"follows? (her|him|them)|watches? (her|him|them) (walk|move|go|leave|pass))\b",
+            re.IGNORECASE,
+        )
+        _facing_camera_re = re.compile(
+            r"\b(faces? (the )?camera|looks? (at|into) (the )?camera|"
+            r"faces? forward|faces? front|toward (the )?camera|"
+            r"selfie|mirror selfie|talking to camera|front.?facing)\b",
+            re.IGNORECASE,
+        )
+        is_facing_away  = bool(_facing_away_re.search(user_input))
+        is_facing_camera = bool(_facing_camera_re.search(user_input))
+
+        # Also force facing-away for voyeur preset unless user explicitly said facing camera
+        if style_preset == "Voyeur — handheld, observational" and not is_facing_camera:
+            is_facing_away = True
+
+        if is_facing_away and not is_facing_camera:
+            voyeur_height = (
+                " The camera is held at hip or chest height — low and discreet, not raised for a clean shot."
+                if style_preset == "Voyeur — handheld, observational" else ""
+            )
+            orientation_instruction = (
+                "\n\n[CAMERA ORIENTATION — CRITICAL: "
+                "The subject MUST NOT face the camera at any point in this scene. "
+                "She faces AWAY from the camera for the entire duration. "
+                "The camera sees her back, the back of her head, and the rear of her body."
+                + voyeur_height +
+                " BEGIN your output with the camera orientation — e.g. 'Rear view.' or 'The camera follows her from behind.' — "
+                "this must be the very first thing stated so the model anchors on it. "
+                "No front-facing shots. No over-the-shoulder shots that show her face. "
+                "The subject is NEVER seen from the front.]"
+            )
+        else:
+            orientation_instruction = ""
+
         # ── Sequence detection ────────────────────────────────────────────────
         _sequence_re = re.compile(r"^\s*(\d+[\.\):])\s+.+", re.MULTILINE)
         sequence_steps = _sequence_re.findall(user_input)
@@ -1231,6 +1321,7 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
             {"role": "system", "content": self.SYSTEM_PROMPT},
             {"role": "user",   "content": (
                 effective_input
+                + orientation_instruction
                 + style_instruction
                 + portrait_instruction
                 + sequence_instruction
