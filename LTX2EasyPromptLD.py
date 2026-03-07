@@ -275,9 +275,12 @@ class LTX2PromptArchitect:
             "Slow motion bursts at peak moments. Natural sound — crowd noise, impact, breathing. "
             "Colour grade: clean and neutral. Camera is athletic — it moves like it is competing too.", False),
         "Music video — stylised": (
-            "STYLE: Music video. Rhythm-cut visual language — movement implies beats even without audio. "
+            "STYLE: Music video. Rhythm-cut visual language — movement is driven by the beat. "
             "High contrast colour grade with stylised palette. "
-            "Mix of tight close-ups and dramatic wide shots. Camera movement is expressive, not documentary.", False),
+            "Mix of tight close-ups and dramatic wide shots. Camera movement is expressive, not documentary. "
+            "AUDIO: Music is present — describe the track's energy, tempo, and texture as physical sound: "
+            "'a driving four-on-the-floor kick', 'sharp hi-hats', 'a warm bass line pulsing beneath the mix'. "
+            "Sync camera and body movement to the implied beat.", False),
         # Aesthetic / Visual
         "Lo-fi home video — VHS": (
             "STYLE: Lo-fi home video. VHS tape aesthetic — slightly washed colour, faint scan lines, soft edges. "
@@ -435,31 +438,41 @@ class LTX2PromptArchitect:
     }
 
     # ── System prompt ─────────────────────────────────────────────────────────
-    SYSTEM_PROMPT = """You are a cinematic prompt writer for LTX-2 / LTX-2.3, an AI video generation model. Your job is to expand a user's rough idea into a clear, direct, video-ready prompt.
+    SYSTEM_PROMPT = """You are a cinematic prompt writer for LTX-2.3, an AI video generation model. Your job is to expand a user's rough idea into a precise, director-level, video-ready prompt that extracts maximum quality from LTX-2.3's capabilities.
+
+LTX-2.3 CAPABILITIES — use these fully:
+- Handles complex prompts with multiple subjects, spatial relationships, layered actions, and stylistic constraints. Specificity wins — do not simplify.
+- Rebuilt VAE renders fine detail: fabric weave, hair strands, surface texture, skin pores, material finish. Describe these explicitly.
+- Stronger prompt adherence means you can direct camera movement alongside subject motion simultaneously.
+- Native portrait support up to 1080x1920 — compose vertically when in portrait mode, not as cropped landscape.
+- Improved audio vocoder — describe sound specifically: tone, intensity, environment, direction.
+- Reduced motion freezing — static prompts still produce static output. Always include motion.
 
 ANTI-HALLUCINATION RULE — this overrides everything else:
 Only describe what the user asked for. Do NOT invent props, atmosphere, or mood elements the user did not mention.
 Do NOT add: rose petals, candles, silk sheets, flowers, soft light, mist, rain, fog, smoke, butterflies, curtains blowing, glitter, sparkles, or any other atmospheric filler the user did not request.
-Do NOT invent a location or setting. If the user gives only an action with no location, shoot it in a neutral unspecified space — do not conjure an industrial warehouse, a kitchen, a forest, or any other environment the user did not describe.
+Do NOT invent a location or setting. If the user gives only an action with no location, shoot it in a neutral unspecified space — do not conjure a warehouse, kitchen, forest, or any environment the user did not describe.
 Do NOT invent abstract emotional sound — no "the heartbeat of the city", no "tension hums in the air", no musical overtones. Sound must be concrete and physical only.
 Every detail must be either (a) directly from the user's input, (b) required by the active style preset, or (c) a necessary camera/lighting/staging decision to make the scene work visually.
 
-PRIORITY ORDER — establish these in order:
-1. Video style & genre — use the STYLE INSTRUCTION you are given as the aesthetic anchor. If no style is given, choose one that fits the scene.
-2. Camera orientation — if the user's input implies the subject should NOT be facing the camera (e.g. "from behind", "follows her", "watches her walk away", "rear view", "over her shoulder"), state this FIRST as the opening words of the prompt. E.g. "Rear view." or "The camera follows her from behind." AI video models default to front-facing subjects — you must override this explicitly and early.
-3. Camera angle & shot type — use cinematographic terms: dolly, orbit, tracking shot, snorkel lens, Dutch angle, bird's-eye, OTS. Be specific.
-4. Lens & optics — state focal length and aperture where appropriate: "85mm f/1.4 portrait lens", "24mm wide angle", "50mm snorkel lens at ground level". This reduces edge shimmer in LTX-2.3.
-5. Character description — age MUST always be a specific number e.g. "a 28-year-old woman" — never omit or approximate. Body type, hair, skin tone, clothing or nude state. Name body parts using the exact words the user used — if they said "pussy" write "pussy", never "womanhood", "sex", "core", or any euphemism.
-6. Scene & environment — location, time of day, lighting, colour. Only what the user described or logically necessary to frame the shot.
+PRIORITY ORDER — build the prompt in this sequence:
+1. Video style & genre — use the STYLE INSTRUCTION as the aesthetic anchor. If none given, choose one that fits.
+2. Camera orientation — if the subject should NOT be facing camera (e.g. "from behind", "follows her", "rear view", "over her shoulder"), state this as the VERY FIRST words. E.g. "Rear view." or "The camera follows her from behind." LTX defaults to front-facing — override it early and explicitly.
+3. Camera angle & shot type — cinematographic terms: dolly, tracking shot, OTS, Dutch angle, bird's-eye, snorkel lens. Be specific.
+4. Lens & optics — always state focal length and aperture: "85mm f/1.4", "24mm wide angle", "50mm macro". Controls edge sharpness and depth of field in LTX-2.3.
+5. Character — age as a specific number always e.g. "a 31-year-old woman" — never omit. Then: hair texture (fine, coarse, wavy, tightly coiled), skin tone, body type, clothing with fabric and material detail (e.g. "a loose cotton t-shirt", "a black satin dress", "worn denim jeans with frayed hems"). Name body parts using the exact words the user used.
+6. Scene & environment — location, time of day, lighting quality and direction, colour temperature, surface textures. Describe material and wear: "cracked concrete floor", "brushed steel countertop", "worn wooden floorboards". Only what the user described or logically necessary.
+7. Spatial blocking — be explicit: left vs right, foreground vs background, distance between subjects, who faces what. Block it like a director. "She stands left of frame, back to camera. He sits on the right, facing her."
 
-THEN:
-6. Action & motion — continuous present-tense sequence, structured in clear beats matching the pacing instruction you are given.
-7. Camera movement — describe as prose, never bracketed directions. Not "(Pull back)" — instead: "the shot pulls back to frame the empty street." Use cinematic vocabulary: dolly in, rack focus, whip pan, push in, crane up, handheld drift.
-8. Audio — weave sound into the prose as short concrete clauses. STRICT RULES: maximum 2 sounds active at any one time per beat. Only physical, real-world sounds — footsteps, a door closing, rain on glass, an engine, a voice. NEVER write abstract emotional audio — no "tension fills the air", no "atmosphere hums with dread", no "heartbeat of the city", no musical metaphors. Sound describes what a microphone would physically pick up. Never use [AMBIENT: ...] tags.
-9. Dialogue — follow the DIALOGUE INSTRUCTION exactly. Write as inline prose with attribution and physical delivery, like a novel. NEVER use [DIALOGUE: ...] tags. DIALOGUE IS REQUIRED when instructed — it is not optional.
+THEN — action and motion:
+8. Action & motion — use VERBS. Specify: who moves, what moves, how they move, what the camera does — as four distinct things when relevant. "She turns her head and steps forward as the camera tracks right." Motion is driven by verbs. Do NOT write static, photo-like descriptions — if the user's input is inherently static, add environmental motion: wind moving hair, background figures walking, a flag rippling, leaves shifting. LTX-2.3 produces freeze frames from static prompts.
+9. Texture & detail in motion — describe how materials behave: "the fabric pulls taut across her hips as she bends", "her hair lifts and separates in the wind", "the leather creases at the elbow as she reaches". LTX-2.3's VAE can render this — use it.
+10. Camera movement — prose only, never bracketed. Not "(Pull back)" — "the shot pulls back to frame the empty corridor." Vocabulary: dolly in, rack focus, whip pan, push in, crane up, handheld drift, slow orbit, creep forward.
+11. Audio — weave as short concrete clauses. Maximum 2 sounds active per beat. Describe tone and intensity: "a low metallic hum", "sharp heels on marble, each step crisp". NEVER abstract emotional audio — no "tension fills the air", no "atmosphere hums with dread". No [AMBIENT: ...] tags. MUSIC EXCEPTION: if the scene involves dancing, a club, a performance, or music is implied — describe the music as physical sound: tempo, bass weight, hi-hat rhythm, drop, swell. "A deep kick drum drives the tempo", "bass pulses through the floor". Music is sound — describe it concretely, do not silence it.
+12. Dialogue — follow the DIALOGUE INSTRUCTION exactly. Inline prose with attribution and physical delivery. No [DIALOGUE: ...] tags.
 
 UNDRESSING RULE — mandatory when clothing removal is implied or stated:
-If the subject starts clothed and the scene involves nudity or stripping, dedicate a full narrative segment to the undressing BEFORE any nudity or explicit act. Name each garment, describe HOW it is removed step by step, describe what is physically REVEALED at each step. Do NOT jump from clothed to naked. Do NOT compress multiple steps into one sentence.
+Dedicate a full narrative segment to undressing BEFORE any nudity or explicit act. Name each garment. Describe HOW it is removed step by step. Describe what is physically REVEALED at each step — include skin texture and how the fabric behaves as it moves. Do NOT jump from clothed to naked. Do NOT compress steps.
 
 GARMENT CHOREOGRAPHY — use the correct physical sequence for each type:
 - Shirt / t-shirt / crop top (full removal): fingers find and grip the hem at the waist → fabric gathered and pulled upward → shirt rises past the stomach → past the ribs → over the chest → pulled over the head and off the arms → discarded
@@ -471,15 +484,16 @@ GARMENT CHOREOGRAPHY — use the correct physical sequence for each type:
 - Jeans / trousers: button popped → zip drawn down → waistband pushed down over the hips → fabric pushed down the thighs → stepped out of
 - Underwear / knickers / thong: thumbs hooked into the waistband at the hips → pushed down → stepped out of
 
-NO INVENTED RESOLUTION: Do NOT have the subject lower, cover, or reverse any action unless the user asked for it. If she lifts her shirt, it stays lifted for the duration of the scene. Do not write her pulling it back down, covering herself, or adjusting clothing unless explicitly requested.
+NO INVENTED RESOLUTION: Do NOT have the subject reverse, cover, or undo any action unless the user asked for it. If she lifts her shirt, it stays lifted. Do not write her pulling it back down or covering herself unless explicitly requested.
 
-PORTRAIT MODE — if the scene is 9:16 vertical: frame everything vertically, tight head-to-torso shots, action moves vertically in frame, no wide horizontal compositions.
+PORTRAIT MODE — 9:16 vertical: compose vertically from the start, not as cropped landscape. Tight head-to-torso framing. Action and camera movement flow vertically in frame. No wide horizontal compositions.
 
 WRITING RULES:
 - Present tense throughout
-- Direct and specific — "her red dress falls to the floor" beats "the crimson fabric cascades like a waterfall of desire"
-- No vague filler: not "beautiful", "stunning", "gorgeous" — describe what is actually visible on screen
-- Do NOT pad to fill length. Write what is needed and stop. Quality over quantity.
+- Specificity wins — "a loose grey cotton t-shirt, slightly faded at the collar" beats "a shirt". LTX-2.3 can render the detail.
+- Direct and concrete — "her red dress falls to the floor" beats "the crimson fabric cascades like a waterfall of desire"
+- No vague filler: not "beautiful", "stunning", "gorgeous", "elegant" — describe what is actually visible on screen
+- Layer complexity — LTX-2.3 holds structure under complex prompts. Use multiple actions, detailed environments, and camera direction together confidently.
 - Flowing prose, not bullet lists
 
 HARD OUTPUT RULES:
@@ -956,11 +970,18 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
                 torch.cuda.manual_seed_all(seed)
 
         # ── Dynamic token budget ─────────────────────────────────────────────
-        # 2.3's stronger text connector handles richer prompts — raised ceiling to 1100
-        token_val = max(150, min(1100, action_count * 130))
-        max_tokens_actual = int(token_val * 1.05)
-        min_tokens = int(token_val * 0.75)
-        print(f"[LTX2] Token budget: {token_val} target / {max_tokens_actual} max (actions: {action_count}, frames: {frame_count}, seconds: {real_seconds:.0f})")
+        # LTX-2.3 text encoder effectively uses ~200 words max.
+        # Anything beyond 500 words is wasted — the model ignores the tail.
+        # Target scales with clip length but is hard-capped at 500.
+        # The LLM generation ceiling is 2x the target so it never clips mid-sentence.
+        LTX_WORD_FLOOR   = 150   # minimum — enough detail for any clip
+        LTX_WORD_CEILING = 500   # hard cap — LTX-2.3 doesn't use beyond this
+
+        # Scale: ~80 words per action, clamped to floor/ceiling
+        token_val        = max(LTX_WORD_FLOOR, min(LTX_WORD_CEILING, action_count * 80 + 100))
+        max_tokens_actual = token_val * 2    # LLM hard stop — always 2x target so it finishes
+        min_tokens       = int(token_val * 0.5)
+        print(f"[LTX2] Token budget: {token_val} words target / {max_tokens_actual} LLM max (actions={action_count}, {real_seconds:.0f}s)")
 
         # ── Temperature ───────────────────────────────────────────────────────
         temp_map = {
@@ -1102,14 +1123,21 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
             )
         else:
             explicit_instruction = (
-                "\n[INSTRUCTION: Write a full cinematic video prompt covering: "
+                "\n[INSTRUCTION: Write a full cinematic LTX-2.3 video prompt. "
+                "LTX-2.3 rewards specificity and complexity — do not simplify. "
+                "Cover in order: "
                 "(1) video style and genre, "
-                "(2) shot type and camera angle with lens specs, "
-                "(3) character — age as a specific number e.g. 'a 34-year-old woman' — never omit, plus appearance, clothing, expression, "
-                "(4) scene — location, lighting, colour, atmosphere, "
-                "(5) action — continuous present-tense movement from start to finish, "
-                "(6) camera movement as prose, not bracketed directions, "
-                "(7) ambient sound woven naturally into the prose.]"
+                "(2) camera orientation if subject faces away — state it first, "
+                "(3) shot type and camera angle with exact lens specs e.g. '85mm f/1.4', "
+                "(4) character — age as a specific number always, hair texture, skin tone, body type, "
+                "clothing described with fabric and material e.g. 'a loose cotton shirt' not just 'a shirt', "
+                "(5) spatial blocking — where subjects are in frame relative to each other and camera, left/right/fore/background, "
+                "(6) scene — location, lighting quality and direction, surface textures and material detail, "
+                "(7) action — use VERBS. State who moves, what moves, how they move, what the camera does. "
+                "If the scene is static, add environmental motion: wind in hair, background figures, fabric moving. Static prompts freeze. "
+                "(8) texture in motion — describe how materials behave: fabric pulling, hair lifting, leather creasing, "
+                "(9) camera movement as prose verbs only — no bracketed directions, "
+                "(10) sound — physical, concrete, max 2 per beat, tone and intensity described.]"
             )
 
         # ── Camera orientation detection ──────────────────────────────────────
@@ -1174,6 +1202,33 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
         else:
             sequence_instruction = ""
 
+        # ── Anti-static detection ─────────────────────────────────────────────
+        # LTX-2.3 produces freeze frames from static prompts. Detect inputs that
+        # describe a pose/state with no motion and inject a motion reminder.
+        _motion_re = re.compile(
+            r"\b(walk\w*|run\w*|mov\w*|turn\w*|lift\w*|bend\w*|reach\w*|pull\w*|push\w*|"
+            r"danc\w*|jump\w*|climb\w*|fall\w*|drop\w*|sit\w*|stand\w*|rise\w*|lean\w*|"
+            r"nod\w*|shak\w*|wave\w*|stir\w*|pour\w*|open\w*|clos\w*|look\w*|glanc\w*|"
+            r"strip\w*|undress\w*|remov\w*|lift\w*|hike\w*|unzip\w*|unbutton\w*|"
+            r"crawl\w*|kneel\w*|stretch\w*|sway\w*|bounce\w*|grind\w*|thrust\w*|"
+            r"follows?|tracking|panning|dolly|zoom\w*|tilt\w*|orbit\w*|drift\w*)\b",
+            re.IGNORECASE,
+        )
+        has_motion = bool(_motion_re.search(user_input))
+        if not has_motion:
+            static_instruction = (
+                "\n\n[ANTI-STATIC INSTRUCTION: The user\'s input describes a static state with no explicit motion. "
+                "LTX-2.3 will freeze on static prompts. You MUST add natural environmental or physical motion to prevent this. "
+                "Choose motion that fits the scene without contradicting the user\'s input: "
+                "wind moving hair or fabric, the subject\'s breathing visible in their chest, "
+                "a subtle weight shift or micro-movement, background figures passing, "
+                "leaves or curtains stirring, a light source flickering, the camera drifting slightly. "
+                "Keep it subtle — do not invent actions the user explicitly excluded. "
+                "The scene must have something moving at all times.]"
+            )
+        else:
+            static_instruction = ""
+
         # ── Person detection ──────────────────────────────────────────────────
         _person_re = re.compile(
             r"\b(he|she|his|her|him|they|them|their|man|men|woman|women|girl|girls|boy|boys|guy|guys|"
@@ -1220,6 +1275,34 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
         else:
             multi_instruction = ""
 
+        # ── Music / dance detection ───────────────────────────────────────────
+        # When user mentions music, dancing, or a beat-driven scene, the "no musical audio"
+        # rule must not suppress music description. Detect and override.
+        _music_re = re.compile(
+            r"\b(music|song|track|beat|bass|rhythm|danc\w*|club|rave|party|dj|"
+            r"playlist|bpm|groove|vibe|concert|gig|perform\w*|sing\w*|singer|"
+            r"strip\w*club|pole danc\w*|lap danc\w*)\b",
+            re.IGNORECASE,
+        )
+        has_music = bool(_music_re.search(user_input))
+
+        if has_music:
+            music_sound_rule = (
+                "SOUND RULE FOR THIS SCENE — MUSIC IS PRESENT: "
+                "There is music in this scene — describe it as physical sound with energy, tempo, and texture. "
+                "Examples: 'a driving kick drum', 'deep bass pulses through the floor', 'sharp hi-hats tick over a slow groove', "
+                "'a warm synth pad swells beneath the mix', 'the track drops into a heavy bass line'. "
+                "Describe what a body in the room would physically feel and hear. "
+                "Maximum 2 additional ambient sounds alongside the music (crowd, breathing, heels on floor). "
+                "Do NOT silence the music. Do NOT describe it as abstract emotion — describe it as physical sound."
+            )
+        else:
+            music_sound_rule = (
+                "SOUND RULE: Maximum 2 ambient sounds active at any one time. "
+                "Only concrete physical sounds — footsteps, a door, rain, an engine, crowd noise. "
+                "No abstract emotional audio. No musical metaphors. No 'tension hums' or 'heartbeat of the city'."
+            )
+
         # ── Dialogue instruction ──────────────────────────────────────────────
         if not has_person:
             dialogue_instruction = ""
@@ -1237,9 +1320,7 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
                 "'\"Come here,\" he says quietly, his hand extended.' "
                 "If the scene is sexual or explicit, dialogue must reflect that — breathless, reactive, direct. "
                 "Weave it into a physical beat — the character speaks while doing something, not in a static pause. "
-                "SOUND RULE: Maximum 2 ambient sounds active at any one time. "
-                "Only concrete physical sounds — footsteps, a door, rain, an engine, crowd noise. "
-                "No abstract emotional audio. No musical metaphors. No 'tension hums' or 'heartbeat of the city'.]"
+                + music_sound_rule + "]"
             )
         else:
             has_user_dialogue = bool(re.search(r'["\u201c\u201d]', user_input))
@@ -1253,9 +1334,8 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
             else:
                 dialogue_instruction = (
                     "\n\n[DIALOGUE INSTRUCTION: No dialogue in this scene. No spoken words. "
-                    "Weave ambient sound naturally into the prose instead — maximum 2 concrete physical sounds "
-                    "active at any one time, described as prose, not tags. "
-                    "Only sounds a microphone would physically pick up. No emotional or musical audio descriptions.]"
+                    "Weave sound naturally into the prose instead — described as prose, not tags. "
+                    + music_sound_rule + "]"
                 )
 
         # ── Length instruction ────────────────────────────────────────────────
@@ -1325,6 +1405,7 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
                 + style_instruction
                 + portrait_instruction
                 + sequence_instruction
+                + static_instruction
                 + no_person_instruction
                 + multi_instruction
                 + dialogue_instruction
