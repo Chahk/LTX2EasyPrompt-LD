@@ -1098,6 +1098,16 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
             ".", text, flags=re.IGNORECASE
         ).strip()
 
+        # Catch additional wind-down closing variants
+        text = re.sub(
+            r'[,.]?\s*[Tt]he (only (sound|accompaniment|thing|noise)|sound of [a-z ]{3,40}) (is|was|remains?) the only [^.]{5,80}\.\s*$',
+            ".", text, flags=re.IGNORECASE
+        ).strip()
+        text = re.sub(
+            r'[,.]?\s*[Tt]he (only (accompaniment|sound|thing)) to (her|his|their) (quiet|soft|gentle) [a-z]{3,30}\.\s*$',
+            ".", text, flags=re.IGNORECASE
+        ).strip()
+
         # Catch "The scene ends there" leaking mid-prose after a sentence
         text = re.sub(r'\.\s+The scene ends there[^.]*\.', '.', text, flags=re.IGNORECASE).strip()
         text = re.sub(r',?\s+before the scene fades to black[^.]*\.', '.', text, flags=re.IGNORECASE).strip()
@@ -1670,19 +1680,32 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
             lift_instruction = ""
 
         # ── Character seed ────────────────────────────────────────────────────
-        # Pick a random character if the scene has a person in it.
-        # Uses the actual seed value for reproducibility — same seed = same character.
-        # If the user already described the character, the note tells the LLM to defer to them.
-        if has_person:
+        # Suppress the seed entirely if the user has already described their character.
+        # A seed is only useful when the user gave NO appearance info — it fills the gap.
+        # If the user wrote age, hair, skin, clothing, or body details, the seed fights them
+        # and wins because it is more specific and positioned last. Suppress it instead.
+        _user_described_character = bool(re.search(
+            r'\b(\d{1,2})[- ]?year[- ]?old\b'  # explicit age number
+            r'|\b(blonde|brunette|redhead|black hair|brown hair|dark hair|grey hair|gray hair'
+            r'|silver hair|auburn|curly|straight|wavy|afro|braids|pixie|bob|long hair|short hair)\b'
+            r'|\b(pale|fair|light|dark|brown|black|tan|olive|caramel|ebony|ivory) skin\b'
+            r'|\b(slim|petite|curvy|full.figured|athletic|muscular|stocky|plus.size|thick)\b'
+            r'|\b(wearing|dressed in|clad in|in a|in her|in his)\b'
+            r'|\b(dress|skirt|jeans|trousers|shirt|blouse|top|coat|jacket|pyjamas|nighty|nightgown|lingerie|underwear|bra|panties)\b',
+            user_input, re.IGNORECASE
+        ))
+
+        if has_person and not _user_described_character:
             rng = random.Random(seed if seed != -1 else None)
             char_description = _build_char_seed(rng)
             char_seed_note = (
                 f"\n[CHARACTER SEED: {char_description}. "
-                f"Use this as your character foundation. Add clothing with exact fabric and material appropriate to the scene. "
-                f"If the user has already described the character's appearance, their description takes priority over this seed.]"
+                f"Use this as your character foundation. Add clothing with exact fabric and material appropriate to the scene.]"
             )
         else:
             char_seed_note = ""
+            if has_person and _user_described_character:
+                print("[LTX2] User described character — seed suppressed. Using input as character source.")
 
         # ── Vision context ────────────────────────────────────────────────────
         # FIX: char_seed_note is suppressed when scene_context is present.
@@ -1706,6 +1729,12 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
             # char_seed_note intentionally NOT appended — the image is the character
         else:
             effective_input = user_input.strip()
+            if has_person and _user_described_character:
+                effective_input += (
+                    "\n[CHARACTER NOTE: The user has described the character's appearance. "
+                    "Use ONLY the user's description for all visual details — age, hair, skin, clothing, body. "
+                    "Do NOT invent or substitute any appearance detail not present in the input above.]"
+                )
             effective_input += char_seed_note
 
         # ── LoRA triggers ─────────────────────────────────────────────────────
