@@ -1,6 +1,7 @@
 import re
 import os
 import json
+import random
 import time as _time
 
 # ── HuggingFace housekeeping ─────────────────────────────────────────────────
@@ -16,20 +17,24 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 # ── Negative prompt builder ───────────────────────────────────────────────────
 
 _NEG_BASE = (
-    "blurry, out of focus, low quality, worst quality, jpeg artifacts, "
-    "static, no motion, frozen, duplicate, watermark, text, signature, "
-    "poorly drawn, bad anatomy, deformed, disfigured, extra limbs, "
-    "missing limbs, floating limbs, disconnected body parts, "
-    "overexposed, underexposed, grainy, noise, moire pattern, shimmer"
+    "watermark, text, signature, duplicate, "
+    "static, no motion, frozen, "
+    "poorly drawn, bad anatomy, deformed, disfigured, "
+    "extra limbs, missing limbs, floating limbs, disconnected body parts, "
+    "micro jitter, flickering, strobing, aliasing, high frequency patterns, "
+    "motion artifacts, temporal inconsistency, frame stuttering"
 )
 
-_NEG_INDOOR        = "harsh outdoor lighting, direct sunlight"
-_NEG_OUTDOOR       = "studio background, indoor lighting"
+# _NEG_INDOOR / _NEG_OUTDOOR removed — LTX-2.3 VAE handles lighting naturally.
+# Injecting these fought the model's improved environmental rendering.
+_NEG_INDOOR        = ""
+_NEG_OUTDOOR       = ""
 _NEG_EXPLICIT      = "censored, mosaic, pixelated, black bar, blurred genitals"
 _NEG_PORTRAIT_SHOT = "wide angle distortion, fish eye, full body shot"
 _NEG_WIDE          = "close-up, portrait crop, tight frame"
-_NEG_NIGHT         = "overexposed, bright daylight, blown highlights"
-_NEG_DAY           = "underexposed, dark shadows, black crush"
+# _NEG_NIGHT / _NEG_DAY removed — LTX-2.3 handles exposure natively.
+_NEG_NIGHT         = ""
+_NEG_DAY           = ""
 _NEG_MULTI         = "merged bodies, fused figures, incorrect number of people"
 _NEG_PORTRAIT_ORI  = "landscape orientation, letterbox, pillarbox, horizontal crop, widescreen framing"
 _NEG_VHS           = "clean digital, sharp edges, 4K, high resolution, pristine quality"
@@ -50,10 +55,13 @@ def _build_negative_prompt(result: str, user_input: str, is_portrait: bool = Fal
     combined = (result + " " + user_input + " " + style_preset).lower()
     extras = []
 
+    # FIX: was previously inverted — indoor scene suppresses _NEG_INDOOR (not _NEG_OUTDOOR)
+    # _NEG_INDOOR and _NEG_OUTDOOR are intentionally empty for LTX-2.3 (model handles lighting natively).
+    # Logic is correct now so re-enabling the strings will work as expected.
     if any(w in combined for w in ["indoor", "room", "interior", "bedroom", "kitchen", "office"]):
-        extras.append(_NEG_OUTDOOR)
-    elif any(w in combined for w in ["outdoor", "street", "beach", "forest", "park", "exterior"]):
         extras.append(_NEG_INDOOR)
+    elif any(w in combined for w in ["outdoor", "street", "beach", "forest", "park", "exterior"]):
+        extras.append(_NEG_OUTDOOR)
 
     if any(w in combined for w in ["pussy", "cock", "penis", "vagina", "nude", "naked", "explicit", "nipple", "breast"]):
         extras.append(_NEG_EXPLICIT)
@@ -63,10 +71,14 @@ def _build_negative_prompt(result: str, user_input: str, is_portrait: bool = Fal
     elif any(w in combined for w in ["wide shot", "wide angle", "aerial", "bird's-eye", "establishing"]):
         extras.append(_NEG_WIDE)
 
+    # FIX: _NEG_NIGHT / _NEG_DAY are intentionally empty for LTX-2.3 (improved exposure handling).
+    # Conditionals are preserved so re-populating the strings works, but empty strings are not appended.
     if any(w in combined for w in ["night", "dark", "moonlight", "dimly lit", "candlelight"]):
-        extras.append(_NEG_NIGHT)
+        if _NEG_NIGHT:
+            extras.append(_NEG_NIGHT)
     elif any(w in combined for w in ["daylight", "sunny", "golden hour", "bright", "midday"]):
-        extras.append(_NEG_DAY)
+        if _NEG_DAY:
+            extras.append(_NEG_DAY)
 
     if any(w in combined for w in ["two women", "two men", "two people", "both", "together", "couple", "they "]):
         extras.append(_NEG_MULTI)
@@ -102,8 +114,194 @@ def _build_negative_prompt(result: str, user_input: str, is_portrait: bool = Fal
     if "sci-fi" in style_preset.lower():
         extras.append(_NEG_SCIFI)
 
-    parts = [_NEG_BASE] + extras
+    # Filter out any empty strings (from removed negatives) and deduplicate
+    parts = [p for p in [_NEG_BASE] + extras if p.strip()]
     return ", ".join(parts)
+
+
+# ── Character attribute pools — mixed independently each run ─────────────────
+# Each dimension is picked separately so combinations are near-infinite.
+# The LD node injects this as a seed note into the user message, identical
+# to the Qwen version. If the user described the character themselves,
+# their description takes priority over the seed.
+
+_CHAR_AGES = [
+    # Children (kept for non-sexual contexts)
+    "8", "9", "10", "11", "12",
+    # Teens
+    "14", "15", "16", "17", "18",
+    # Core range 19–35 — weighted heavily (appears 3x more than 36+)
+    "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29",
+    "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29",
+    "30", "31", "32", "33", "34", "35",
+    "30", "31", "32", "33", "34", "35",
+    # Adults 36–45 — present but rare
+    "36", "37", "38", "40", "42", "44",
+    # 46+ — only surfaces when context implies it (old/mature/elderly keywords handled in prompt)
+    "48", "52", "58",
+]
+
+_CHAR_ETHNICITIES = [
+    # East Asian
+    ("East Asian",      "fair cool-toned skin with a subtle pink undertone"),
+    ("East Asian",      "light ivory skin with warm golden undertones"),
+    ("Japanese",        "pale skin with cool beige undertones"),
+    ("Korean",          "fair skin with a soft peachy-pink flush"),
+    ("Chinese",         "light golden-toned skin"),
+    # South Asian
+    ("South Asian",     "warm medium brown skin with golden undertones"),
+    ("South Asian",     "deep brown skin with rich warm undertones"),
+    ("Indian",          "light caramel skin with a warm yellow-brown tone"),
+    ("Indian",          "deep mahogany skin with warm red undertones"),
+    # Southeast Asian
+    ("Southeast Asian", "golden tan skin with warm undertones"),
+    ("Southeast Asian", "light brown skin with a soft amber glow"),
+    ("Filipino",        "medium warm brown skin"),
+    ("Vietnamese",      "light olive skin with golden tones"),
+    # Middle Eastern / North African
+    ("Middle Eastern",  "warm olive skin with subtle golden undertones"),
+    ("Middle Eastern",  "light brown skin with honey-gold undertones"),
+    ("North African",   "medium warm brown skin with a golden cast"),
+    # Black / African descent
+    ("Black",           "deep ebony skin with cool blue-black undertones"),
+    ("Black",           "rich dark brown skin with warm red undertones"),
+    ("Black",           "medium warm brown skin with golden undertones"),
+    ("Black",           "deep mahogany skin"),
+    ("Black",           "light golden-brown skin"),
+    # Latina / Hispanic
+    ("Latina",          "warm medium tan skin with golden-brown undertones"),
+    ("Latina",          "light olive skin with warm undertones"),
+    ("Latina",          "deep warm brown skin"),
+    # White / European
+    ("White",           "pale freckled skin with pink undertones"),
+    ("White",           "fair skin with cool undertones"),
+    ("White",           "light skin with warm peachy tones"),
+    ("White",           "porcelain skin with visible blue veins at the temples"),
+    # Mixed / multiracial
+    ("mixed race",      "warm golden-brown skin with cool undertones"),
+    ("mixed race",      "light tan skin with a warm olive cast"),
+    ("mixed race",      "medium brown skin with golden-red undertones"),
+    # Indigenous / Pacific
+    ("Indigenous",      "warm copper-brown skin with red undertones"),
+    ("Pacific Islander","deep warm tan skin with golden-brown tones"),
+]
+
+_CHAR_HAIR_COLOURS = [
+    "jet black",
+    "dark brown",
+    "warm medium brown",
+    "auburn",
+    "dark auburn",
+    "copper red",
+    "bright copper",
+    "strawberry blonde",
+    "honey blonde",
+    "ash blonde",
+    "platinum blonde",
+    "silver-white",
+    "silver-streaked dark brown",
+    "blue-black",
+    "dyed burgundy",
+    "dyed deep violet",
+    "dyed bleach blonde with dark roots",
+    "natural dark brown with caramel highlights",
+    "salt-and-pepper grey",
+    "warm chestnut brown",
+]
+
+_CHAR_HAIR_STYLES = [
+    # Natural textures
+    "tight 4C coils, natural and full",
+    "loose 3B curls, mid-length",
+    "thick natural afro, rounded",
+    "defined 3C ringlets, shoulder-length",
+    "big loose natural curls, voluminous",
+    # Protective styles
+    "long box braids falling past the shoulders",
+    "short box braids, chin-length",
+    "thick cornrows flat to the scalp",
+    "two-strand twists, loose and mid-length",
+    "high bun of twisted locs",
+    "long faux locs, loose",
+    # Straight styles
+    "pin-straight, very long, falling to the waist",
+    "pin-straight, blunt cut to the shoulder",
+    "sleek straight hair, cut to the chin",
+    "straight with a heavy blunt fringe",
+    # Wavy styles
+    "loose beach waves, mid-back length",
+    "tousled waves, shoulder-length",
+    "soft waves with a side part, collarbone length",
+    # Short styles
+    "cropped pixie cut, textured",
+    "buzzed close on the sides, longer on top",
+    "short tapered cut with volume at the crown",
+    "chin-length bob, blunt",
+    "asymmetric bob, longer on one side",
+    # Updos / tied
+    "high ponytail, sleek",
+    "messy bun with loose strands framing the face",
+    "half-up half-down, loosely pinned",
+    "low bun, tight and smooth",
+    # Long styles
+    "very long straight hair, centre-parted",
+    "long layered hair with curtain bangs",
+    "long thick hair in a loose braid over one shoulder",
+]
+
+_CHAR_BODY_TYPES = [
+    # Slender / lean
+    "slender build with narrow shoulders",
+    "lean and tall with long limbs",
+    "slim with a flat stomach and narrow hips",
+    "petite and slender, small-framed",
+    "thin with delicate bone structure",
+    # Athletic
+    "athletic build with defined shoulders",
+    "muscular and toned with broad shoulders",
+    "lean and athletic with visible muscle definition",
+    "strong legs and a narrow waist",
+    "compact and powerfully built",
+    # Average / medium
+    "average build with soft curves",
+    "medium build with a naturally rounded figure",
+    "medium height, balanced proportions",
+    "slightly soft figure with gentle curves",
+    # Curvy / full-figured
+    "full hourglass figure with wide hips and a defined waist",
+    "curvy with a round bust and full hips",
+    "voluptuous with a soft stomach and generous curves",
+    "big-busted with a narrow waist and wide hips",
+    "full-figured and tall with a commanding presence",
+    # Petite / short
+    "petite with a small frame and short stature",
+    "short and curvy with a compact figure",
+    "tiny frame, barely five feet tall",
+    # Plus size / soft
+    "plus-size with a soft round belly and full arms",
+    "full-figured with heavy thighs and a wide waist",
+    "chubby with round cheeks and a soft generous body",
+    "fat with a pronounced belly and thick legs",
+    "large and soft, with wide hips and heavy breasts",
+    # Tall
+    "tall and willowy with long legs",
+    "statuesque, over six feet, lean",
+]
+
+
+def _build_char_seed(rng: random.Random) -> str:
+    """Assemble a character description by picking each dimension independently."""
+    age             = rng.choice(_CHAR_AGES)
+    ethnicity, skin = rng.choice(_CHAR_ETHNICITIES)
+    hair_colour     = rng.choice(_CHAR_HAIR_COLOURS)
+    hair_style      = rng.choice(_CHAR_HAIR_STYLES)
+    body_type       = rng.choice(_CHAR_BODY_TYPES)
+    return (
+        f"a {age}-year-old {ethnicity} woman, "
+        f"{hair_colour} hair in a {hair_style}, "
+        f"{skin}, "
+        f"{body_type}"
+    )
 
 
 class LTX2PromptArchitect:
@@ -193,6 +391,34 @@ class LTX2PromptArchitect:
     # Maps dropdown label → (style instruction, portrait flag)
     STYLE_PRESETS = {
         "None — let the LLM decide": ("", False),
+        # Cinematic tiers
+        "Cinematic — Drama": (
+            "STYLE: Cinematic drama. Intimate, character-driven. Shallow depth of field — subject sharp, "
+            "world behind them soft. Colour grade: cool shadows, warm skin tones, restrained palette. "
+            "Camera: medium close-ups and close-ups dominate. Moves are slow and purposeful — "
+            "a slow push-in on a face, a rack focus between two people, a static hold that lets the actor breathe. "
+            "Lighting: motivated practical sources — a lamp, a window, a candle. Never flat. "
+            "Kodak 2383 print emulation. Sound: intimate and close — breath, fabric, small environmental detail. "
+            "No wide establishing shots unless the user asked for them. Stay with the character.", False),
+        "Cinematic — Epic": (
+            "STYLE: Epic cinematic. Scale and environment are the protagonist. "
+            "Wide lenses — 24mm to 35mm. Vast compositions that make people feel small against the world. "
+            "Camera: sweeping crane moves, slow orbital shots, long tracking shots across terrain. "
+            "Colour grade: rich, contrasty — deep shadows, luminous highlights. "
+            "Kodak 5219 for natural daylight scenes, ARRI Alexa for clean digital grandeur. "
+            "Sound: environmental and large — wind, distance, the weight of open space. "
+            "Every frame should feel like a poster. Build depth with foreground elements. "
+            "Motion blur on fast movement. Natural motion blur, 180 degree shutter equivalent.", False),
+        "Cinematic — Intimate close-up": (
+            "STYLE: Intimate close-up cinema. The entire world is a face, a hand, a detail. "
+            "Focal lengths: 85mm to 135mm f/1.2 to f/1.8. Razor-thin depth of field — "
+            "one eye sharp, the other already soft. Bokeh is smooth and organic. "
+            "Camera: barely moves — micro drifts and imperceptible breathing. "
+            "Colour grade: skin-tone faithful, no heavy colour casts. Warm and close. "
+            "Lighting: one soft source, one fill, nothing else. "
+            "Sound: amplified intimacy — breath, the swallow of saliva, fabric against skin, heartbeat proximity. "
+            "Reveal character through detail — a tightening jaw, a flicker of the eye, fingers finding each other. "
+            "This is portraiture as cinema.", False),
         # Cinematic / Narrative
         "Slow-burn thriller": (
             "STYLE: Slow-burn psychological thriller. Tight framing, long held shots, shallow depth of field. "
@@ -392,6 +618,10 @@ class LTX2PromptArchitect:
     # Single INT output — wire to video save node and audio save node
     # 24 = cinematic  |  30 = realistic / action
     PRESET_FPS = {
+        # Cinematic tiers
+        "Cinematic — Drama":                        24,
+        "Cinematic — Epic":                         24,
+        "Cinematic — Intimate close-up":            24,
         # Cinematic / Narrative
         "None — let the LLM decide":                24,
         "Slow-burn thriller":                       24,
@@ -437,67 +667,130 @@ class LTX2PromptArchitect:
         "3B - Llama-3.2 Abliterated (Low VRAM)": "huihui-ai/Llama-3.2-3B-Instruct-abliterated",
     }
 
+    # ── Style label map — class-level constant (FIX: was rebuilt inside generate() every call) ──
+    # These labels are prepended to the output so LTX-2.3's text encoder sees the render style.
+    # Kept in sync with STYLE_PRESETS and PRESET_FPS here at class scope.
+    PRESET_STYLE_LABEL = {
+        # Cinematic tiers
+        "Cinematic — Drama":                        "Cinematic drama, shallow depth of field, Kodak 2383.",
+        "Cinematic — Epic":                         "Cinematic epic, vast wide-angle compositions.",
+        "Cinematic — Intimate close-up":            "Intimate close-up cinema, 85mm-135mm, razor-thin depth of field.",
+        # Cinematic
+        "Slow-burn thriller":                       "Slow-burn psychological thriller.",
+        "Handheld documentary":                     "Handheld documentary footage.",
+        "High fashion editorial":                   "High fashion editorial video.",
+        "Noir — deep shadows, venetian light":      "Classic noir, black and white, venetian blind shadows.",
+        "Golden hour drama":                        "Golden hour cinematic drama.",
+        "Horror — desaturated, harsh contrast":     "Horror film, desaturated, harsh contrast.",
+        # Adult
+        "Erotic cinema — tasteful, cinematic":      "Tasteful erotic cinema, warm intimate lighting.",
+        "Explicit — direct, anatomical":            "Explicit adult video, direct lighting.",
+        "Voyeur — handheld, observational":         "Voyeuristic handheld footage.",
+        "Softcore editorial — lingerie-adjacent":   "Softcore editorial, fashion magazine aesthetic.",
+        "Amateur — naturalistic, raw":              "Amateur home video, naturalistic.",
+        # Action
+        "Action blockbuster":                       "Action blockbuster, teal and orange grade.",
+        "Sports documentary":                       "Sports documentary footage.",
+        "Music video — stylised":                   "Stylised music video.",
+        # Aesthetic
+        "Lo-fi home video — VHS":                   "Lo-fi VHS home video footage.",
+        "Hyper-real 4K — clinical sharpness":       "Hyper-real 4K, clinical sharpness.",
+        "Dreamy — soft focus, slow motion":         "Dreamy soft focus, slow motion.",
+        "Gritty realism — flat, natural light":     "Gritty realism, flat natural light.",
+        # Speciality
+        "POV — first person, immersive":            "First-person POV footage.",
+        "Portrait vertical — 9:16 mobile":          "Vertical 9:16 mobile video.",
+        # Animation
+        "Anime — Japanese animation":               "Japanese anime animation, hand-drawn cel style.",
+        "2D cartoon — hand-drawn":                  "2D hand-drawn cartoon animation.",
+        "3D CGI — Pixar/DreamWorks":                "3D CGI animation, Pixar style.",
+        "Stop motion — claymation":                 "Stop motion claymation animation.",
+        "Comic book / graphic novel":               "Comic book graphic novel style.",
+        "Cel-shaded — flat colour 3D":              "Cel-shaded 3D animation, flat colour fills.",
+        "Rotoscope — animated over live action":    "Rotoscoped animation over live action.",
+        "Cyberpunk neon illustrated":               "Cyberpunk neon illustrated, magenta and cyan.",
+        "Sci-fi — cinematic, practical":            "Cinematic science fiction, practical sets.",
+    }
+
     # ── System prompt ─────────────────────────────────────────────────────────
-    SYSTEM_PROMPT = """You are a cinematic prompt writer for LTX-2.3, an AI video generation model. Your job is to expand a user's rough idea into a precise, director-level, video-ready prompt that extracts maximum quality from LTX-2.3's capabilities.
+    SYSTEM_PROMPT = """You are a cinematic prompt writer for LTX-2.3, an AI video generation model. Expand the user's rough idea into a precise, director-level, video-ready prompt. Be specific — LTX-2.3 rewards complexity and detail.
 
-LTX-2.3 CAPABILITIES — use these fully:
-- Handles complex prompts with multiple subjects, spatial relationships, layered actions, and stylistic constraints. Specificity wins — do not simplify.
-- Rebuilt VAE renders fine detail: fabric weave, hair strands, surface texture, skin pores, material finish. Describe these explicitly.
-- Stronger prompt adherence means you can direct camera movement alongside subject motion simultaneously.
-- Native portrait support up to 1080x1920 — compose vertically when in portrait mode, not as cropped landscape.
-- Improved audio vocoder — describe sound specifically: tone, intensity, environment, direction.
-- Reduced motion freezing — static prompts still produce static output. Always include motion.
+LTX-2.3 CAPABILITIES — exploit all of these:
+- Complex prompts work. Multiple subjects, spatial relationships, layered actions, stylistic constraints — specificity wins, do not dumb it down.
+- Rebuilt VAE renders fine detail: fabric weave, individual hair strands, skin texture, surface wear, material finish. Describe these.
+- Stronger prompt adherence — you can direct camera AND subject motion simultaneously.
+- Native portrait up to 1080x1920 — compose vertically, not as cropped landscape.
+- Improved audio vocoder — describe sound with tone, intensity, environment. Sound is always present. Exception: if the scene has no people and no music, use environmental/physical sound only — no voices, no crowd noise, no implied human presence.
+- Reduced motion freezing — always include motion. Static prompts produce static video.
 
-ANTI-HALLUCINATION RULE — this overrides everything else:
-Only describe what the user asked for. Do NOT invent props, atmosphere, or mood elements the user did not mention.
-Do NOT add: rose petals, candles, silk sheets, flowers, soft light, mist, rain, fog, smoke, butterflies, curtains blowing, glitter, sparkles, or any other atmospheric filler the user did not request.
-Do NOT invent a location or setting. If the user gives only an action with no location, shoot it in a neutral unspecified space — do not conjure a warehouse, kitchen, forest, or any environment the user did not describe.
-Do NOT invent abstract emotional sound — no "the heartbeat of the city", no "tension hums in the air", no musical overtones. Sound must be concrete and physical only.
-Every detail must be either (a) directly from the user's input, (b) required by the active style preset, or (c) a necessary camera/lighting/staging decision to make the scene work visually.
+SCENE INTEGRITY:
+Build outward from what the user gave you — do not contradict or override it.
+If the user described a location, enrich it with specific textures and atmosphere that fit: a city street becomes "wet asphalt reflecting neon, steam rising from a grate, the cold blue cast of a streetlamp". A café becomes "warm tungsten light, fogged glass, the grain of the wooden tabletop".
+If the user gave NO location, shoot in a neutral unspecified space — do not invent a warehouse, forest, or bedroom they didn't ask for.
+Do NOT add: rose petals, candles, silk sheets, glitter, sparkles, or sentimental filler that isn't grounded in the scene.
+Do NOT invent props or characters the user didn't mention.
+Every addition must be (a) from the user's input, (b) a texture/material/atmosphere detail that enriches what they described, or (c) a necessary camera/staging decision.
 
-PRIORITY ORDER — build the prompt in this sequence:
-1. Video style & genre — use the STYLE INSTRUCTION as the aesthetic anchor. If none given, choose one that fits.
-2. Camera orientation — if the subject should NOT be facing camera (e.g. "from behind", "follows her", "rear view", "over her shoulder"), state this as the VERY FIRST words. E.g. "Rear view." or "The camera follows her from behind." LTX defaults to front-facing — override it early and explicitly.
-3. Camera angle & shot type — cinematographic terms: dolly, tracking shot, OTS, Dutch angle, bird's-eye, snorkel lens. Be specific.
-4. Lens & optics — always state focal length and aperture: "85mm f/1.4", "24mm wide angle", "50mm macro". Controls edge sharpness and depth of field in LTX-2.3.
-5. Character — age as a specific number always e.g. "a 31-year-old woman" — never omit. Then: hair texture (fine, coarse, wavy, tightly coiled), skin tone, body type, clothing with fabric and material detail (e.g. "a loose cotton t-shirt", "a black satin dress", "worn denim jeans with frayed hems"). Name body parts using the exact words the user used.
-6. Scene & environment — location, time of day, lighting quality and direction, colour temperature, surface textures. Describe material and wear: "cracked concrete floor", "brushed steel countertop", "worn wooden floorboards". Only what the user described or logically necessary.
-7. Spatial blocking — be explicit: left vs right, foreground vs background, distance between subjects, who faces what. Block it like a director. "She stands left of frame, back to camera. He sits on the right, facing her."
+CAMERA ORIENTATION — IMPORTANT:
+The DEFAULT assumption is that the subject FACES the camera unless the user's input clearly requires otherwise.
+ONLY write "Rear view" or "camera follows from behind" if the user explicitly stated one of these: "from behind", "rear view", "back view", "follow her from behind", "watches her from behind", "camera behind", "over her shoulder from behind".
+Do NOT default to rear view just because the subject is walking or moving. A woman walking toward camera or facing camera is the correct default. Rear view is an exception, not the rule.
 
-THEN — action and motion:
-8. Action & motion — use VERBS. Specify: who moves, what moves, how they move, what the camera does — as four distinct things when relevant. "She turns her head and steps forward as the camera tracks right." Motion is driven by verbs. Do NOT write static, photo-like descriptions — if the user's input is inherently static, add environmental motion: wind moving hair, background figures walking, a flag rippling, leaves shifting. LTX-2.3 produces freeze frames from static prompts.
-9. Texture & detail in motion — describe how materials behave: "the fabric pulls taut across her hips as she bends", "her hair lifts and separates in the wind", "the leather creases at the elbow as she reaches". LTX-2.3's VAE can render this — use it.
-10. Camera movement — prose only, never bracketed. Not "(Pull back)" — "the shot pulls back to frame the empty corridor." Vocabulary: dolly in, rack focus, whip pan, push in, crane up, handheld drift, slow orbit, creep forward.
-11. Audio — weave as short concrete clauses. Maximum 2 sounds active per beat. Describe tone and intensity: "a low metallic hum", "sharp heels on marble, each step crisp". NEVER abstract emotional audio — no "tension fills the air", no "atmosphere hums with dread". No [AMBIENT: ...] tags. MUSIC EXCEPTION: if the scene involves dancing, a club, a performance, or music is implied — describe the music as physical sound: tempo, bass weight, hi-hat rhythm, drop, swell. "A deep kick drum drives the tempo", "bass pulses through the floor". Music is sound — describe it concretely, do not silence it.
-12. Dialogue — follow the DIALOGUE INSTRUCTION exactly. Inline prose with attribution and physical delivery. No [DIALOGUE: ...] tags.
+SCENE DIRECTION — build the prompt in this order:
+1. Style & genre — use the STYLE INSTRUCTION as the aesthetic anchor. Where it fits the mood, weave a film stock or camera system reference into the prose naturally — e.g. 'the image carries a Kodak 2383 warmth', 'shot on an ARRI Alexa, clean and clinical', 'Fuji Eterna desaturation flattens the shadows'. NEVER output film stock as a bracketed tag or prefix like [Kodak 5219]. It must read as part of a sentence, not a label.
+2. Shot type & camera angle — specific cinematographic terms: medium close-up, OTS, Dutch angle, bird's-eye, tracking shot. Never vague.
+3. Lens & optics — ALWAYS include focal length AND aperture in every prompt: "85mm f/1.4", "35mm f/2.8", "50mm anamorphic equivalent f/2.0", "24mm wide f/4". This is non-negotiable — it controls depth, edge sharpness, and spatial compression. Also specify: natural motion blur, 180 degree shutter equivalent. These two phrases are mandatory in every prompt — they prevent unnatural movement at all frame rates.
+4. Character — ALWAYS state age as a specific number e.g. "a 27-year-old woman". Default age range is 18–35 unless the user's input implies otherwise. Only use ages 40+ if the user mentions words like "older", "mature", "middle-aged", "elderly", "old man", "old woman". Only use child/teen ages (under 18) if the user's input explicitly places the character in a school, childhood, or teen context — and NEVER assign child/teen ages to any sexual or suggestive content. Then: hair texture and colour, skin tone, body type, clothing described with fabric and material ("a fitted black cotton crop top", "worn light-wash denim jeans", "a loose cream silk blouse"). Use the exact words the user used for body parts. Include subtle emotional cues and micro expressions: "the corners of her lips tighten slightly", "her eyes momentarily lose focus", "a faint crease forms between her brows". These create depth and life in the character.
+5. Scene & environment — location, time of day, lighting quality and direction, colour temperature, surface textures ("scuffed hardwood floor", "rain-streaked glass", "warm tungsten interior"). Only what the user described. Avoid high frequency visual patterns in clothing, backgrounds, and surfaces — these cause flickering artifacts. Favour solid colours, simple textures, and smooth surfaces.
+6. Spatial blocking — MANDATORY and explicit. Define: left/right position, foreground/background depth, approximate distance between subjects, who faces what. "She stands centre-left in the foreground, facing camera. He sits two metres behind her at the right edge of frame, slightly soft." For single subjects: anchor them in frame — "She stands centre-frame, mid-shot, facing camera, the background three metres behind her." Block every scene like a director.
 
-UNDRESSING RULE — mandatory when clothing removal is implied or stated:
-Dedicate a full narrative segment to undressing BEFORE any nudity or explicit act. Name each garment. Describe HOW it is removed step by step. Describe what is physically REVEALED at each step — include skin texture and how the fabric behaves as it moves. Do NOT jump from clothed to naked. Do NOT compress steps.
+ACTION & MOTION:
+7. Motion — VERBS OF PROGRESSION are primary. State all four simultaneously when possible: who moves, what moves, how they move, what the camera does. "She steps forward and turns as the camera tracks left and slowly pushes in." Layer actions — LTX-2.3 holds complex motion structure. If the user's input is genuinely static (a portrait, a held moment), add ONE subtle environmental motion only: a camera drift, wind in hair, a background figure. Do not pile on micro-movements — use directed camera or subject action first. For smooth motion: use stable dolly movement, smooth gimbal tracking, constant speed pan, controlled camera path. Avoid chaotic movement, irregular motion paths, or rapid zooming unless stylistically required.
+8. Texture in motion — how materials behave as things move: "the fabric pulls taut across her hips", "her hair lifts and separates", "the denim creases at the knee as she bends". LTX-2.3 renders this.
+9. Camera movement — prose verbs only, never bracketed. "The shot slowly pushes in" not "(Push in)". Vocabulary: dolly in/out, rack focus, whip pan, push in, crane up, handheld drift, slow orbit, creep forward, track right, stabilised gimbal arc.
 
-GARMENT CHOREOGRAPHY — use the correct physical sequence for each type:
-- Shirt / t-shirt / crop top (full removal): fingers find and grip the hem at the waist → fabric gathered and pulled upward → shirt rises past the stomach → past the ribs → over the chest → pulled over the head and off the arms → discarded
-- Shirt / t-shirt / crop top (lift only — not removed): fingers find the hem at the waist → grip the fabric → slowly gather and lift → fabric rises past the stomach → past the navel → past the ribs → chest comes into view → breasts fully exposed → held there. Every step is its own sentence. Do NOT compress into one line.
-- Dress (pullover): hands grip the hem at the thighs → lifted up past the hips → past the waist → gathered over the chest → pulled over the head → falls away
-- Dress (zip): hand reaches behind to find the zip → zip pulled slowly downward → fabric loosens and parts → dress slipped off the shoulders → slides down the body → falls to the floor
-- Blouse / button-down: fingers work each button from top to bottom one at a time → fabric parts with each button → shrugged off the shoulders → slides down the arms → dropped
-- Bra: hand reaches behind to the clasp → clasp unhooked → straps slacken → straps slipped off each shoulder in turn → cups fall away → removed and set aside
-- Jeans / trousers: button popped → zip drawn down → waistband pushed down over the hips → fabric pushed down the thighs → stepped out of
-- Underwear / knickers / thong: thumbs hooked into the waistband at the hips → pushed down → stepped out of
+SOUND — always present, always described:
+10. Sound is MANDATORY in every prompt — there are no silent scenes. Weave it as descriptive prose with tone, intensity, and environment. Max 2 sounds active per beat. When action and sound are synchronised, describe the timing explicitly: "the sticks strike on every downbeat", "the click of the shutter precisely as her fingers press", "footsteps landing on each beat of the track". Temporal sync language strengthens audio-visual coherence.
+- Standard scenes: physical, real-world sounds with full sensory detail. Not just "footsteps" — "the sharp, rhythmic clack of heels on cold marble, each step ringing with a hollow metallic echo." Not just "rain" — "rain striking the glass in irregular bursts, a low persistent hiss beneath it." Describe what the sound feels like in the body, not just what it is.
+- Music/dance/club/performance scenes: describe the track as physical sensation — "a deep kick drum at 128bpm punches through the floor, the sub-bass felt in the chest", "sharp hi-hats tick over a slow rolling groove", "the mix drops into a heavy bass swell that fills the room". Do NOT silence music. Do NOT reduce it to "music plays".
+- Never use [AMBIENT: ...] tags. No abstract emotional audio — no "tension fills the air", no "heartbeat of the city".
 
-NO INVENTED RESOLUTION: Do NOT have the subject reverse, cover, or undo any action unless the user asked for it. If she lifts her shirt, it stays lifted. Do not write her pulling it back down or covering herself unless explicitly requested.
+CRITICAL RULES:
+- NEVER write scene endings. Prompts describe ongoing action, not conclusions. Never use: "the scene ends", "the shot ends", "comes to a close", "fades to black", "the camera cuts", "hard stop", "scene closes", "camera lingers on the final". The scene is always mid-action.
+- NEVER invent additional characters. If the user describes one person, there is one person. If the user describes two people, there are two. Do NOT add bystanders, passers-by, partners, or observers unless the user explicitly wrote them into the scene.
 
-PORTRAIT MODE — 9:16 vertical: compose vertically from the start, not as cropped landscape. Tight head-to-torso framing. Action and camera movement flow vertically in frame. No wide horizontal compositions.
+DIALOGUE — follow the DIALOGUE INSTRUCTION exactly. Inline prose with attribution. No [DIALOGUE: ...] tags.
+
+UNDRESSING — when clothing removal is stated or clearly implied:
+Write a dedicated undressing segment BEFORE any nudity. Name every garment. Describe each removal step by step. Describe what skin is revealed and how the fabric behaves. Never jump from clothed to naked.
+
+GARMENT SEQUENCES — use the correct physical order for each type:
+- T-shirt / shirt / crop top (full removal): grip the hem at the waist → pull fabric up past the stomach → past the ribs → over the chest → over the head → off the arms → dropped
+- T-shirt / shirt / crop top (lift only, not removed): grip the hem → slowly gather and lift → rises past the stomach → past the navel → past the ribs → chest comes into full view → held there. One sentence per step.
+- Dress (pullover): grip hem at thighs → lift past hips → past waist → gathered up over chest → over the head → falls
+- Dress (zip back): hand reaches behind → finds the zip → pulls it slowly down → fabric loosens and parts → slipped off shoulders → slides down the body → pools at the floor
+- Blouse / button-down: each button worked top to bottom one at a time → fabric parts → shrugged off shoulders → slides down arms → dropped
+- Bra: hand behind to clasp → unhooked → straps eased off each shoulder → cups fall away
+- Jeans / trousers: button popped → zip down → pushed over hips → down the thighs → stepped out of
+- Underwear / knickers / thong: thumbs hooked into waistband → pushed down → stepped out of
+
+NO INVENTED RESOLUTION: If the shirt goes up, it stays up. Do NOT write her covering herself, lowering it, or reversing the action unless the user asked for it.
+
+PORTRAIT MODE — 9:16 vertical: frame vertically from the start. Tight head-to-torso shots. Vertical action and camera movement. No wide horizontal compositions.
 
 WRITING RULES:
 - Present tense throughout
-- Specificity wins — "a loose grey cotton t-shirt, slightly faded at the collar" beats "a shirt". LTX-2.3 can render the detail.
-- Direct and concrete — "her red dress falls to the floor" beats "the crimson fabric cascades like a waterfall of desire"
-- No vague filler: not "beautiful", "stunning", "gorgeous", "elegant" — describe what is actually visible on screen
-- Layer complexity — LTX-2.3 holds structure under complex prompts. Use multiple actions, detailed environments, and camera direction together confidently.
-- Flowing prose, not bullet lists
+- Specific over vague: "a loose grey cotton t-shirt, collar slightly stretched" beats "a shirt"
+- Concrete over poetic: "her dress falls to the floor" beats "the fabric cascades"
+- No filler adjectives: not "beautiful", "stunning", "gorgeous" — describe what's visible
+- Always include motion. Always include sound. Both are mandatory.
+- Always include natural motion blur and 180 degree shutter equivalent — every prompt, no exceptions.
+- Always include lens focal length and aperture — every prompt, no exceptions.
+- Avoid high frequency patterns in clothing, backgrounds, and surfaces — these cause flickering.
+- Flowing prose, not lists
 
-HARD OUTPUT RULES:
-Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No checklist, compliance note, or summary at the end. No token counts. No brackets after the last sentence. The output ends with the last sentence of the scene. Begin immediately with the video style or shot description."""
+OUTPUT RULES:
+Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no compliance notes, no word counts, no brackets after the final sentence. Begin immediately with the shot or style description. End with the last sentence of the scene."""
 
     _PREAMBLE_RE = re.compile(
         r"^(Sure!?|Certainly!?|Absolutely!?|Of course!?|Here(?:'s| is).*?:|Great!?|"
@@ -515,6 +808,7 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
         self.loaded_model_key = None
         self._last_portrait = False
         self._last_style = ""
+        self._stop_token_ids = []  # FIX: cached at load time, not rebuilt every generate() call
 
     def load_model(self, model_key: str, offline_mode: bool, local_path: str):
         if self.model is not None and self.loaded_model_key != model_key:
@@ -575,6 +869,8 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
         self.model.config.use_cache = True
         self.model.eval()
         self.loaded_model_key = model_key
+        # FIX: cache stop token IDs at load time — no need to recompute every generate() call
+        self._stop_token_ids = self._build_stop_token_ids()
         print(f"[LTX2] Loaded: {model_key}")
 
     def unload_model(self):
@@ -755,6 +1051,8 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
         text = re.sub(r"\(The action takes up roughly[^\)]*\)", " ", text, flags=re.IGNORECASE).strip()
         text = re.sub(r"\((?:DOWN|UP|PULL|PUSH|ZOOM|HOLD|FADE|PAN|TILT|TRUCK|DOLLY|AMBIENT)[^\)]{0,80}\)", "", text, flags=re.IGNORECASE).strip()
         text = re.sub(r"\[AMBIENT:\s*([^\]]*)\]", r"\1", text, flags=re.IGNORECASE).strip()
+        # Strip bracketed film stock / camera tags the LLM sometimes outputs as labels
+        text = re.sub(r"\[(Kodak|ARRI|Fuji|Film stock|film stock)[^\]]{0,80}\]\s*", "", text, flags=re.IGNORECASE).strip()
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
         # Strip inline parenthetical annotation leaks e.g. (camera angle: bird's-eye), (genre: nature, style: drone)
@@ -826,6 +1124,8 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
                 self.unload_model()
             neg_prompt = _build_negative_prompt("", user_input, is_portrait=portrait_mode, style_preset=style_preset)
             fps = self.PRESET_FPS.get(style_preset, 24)
+            if portrait_mode and fps == 24:  # FIX: portrait always 30fps
+                fps = 30
             return (user_input.strip(), user_input.strip(), neg_prompt, fps, "")
 
         # ── Pre-run VRAM clear — always runs before loading anything ────────────
@@ -872,48 +1172,8 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
         style_instruction_text = preset_data[0]
         is_portrait            = portrait_mode or preset_data[1]
 
-        # Labels that must appear verbatim at the start of the generated prompt
-        # so LTX-2's text encoder knows the render style
-        PRESET_STYLE_LABEL = {
-            # Cinematic
-            "Slow-burn thriller":                       "Slow-burn psychological thriller.",
-            "Handheld documentary":                     "Handheld documentary footage.",
-            "High fashion editorial":                   "High fashion editorial video.",
-            "Noir — deep shadows, venetian light":      "Classic noir, black and white, venetian blind shadows.",
-            "Golden hour drama":                        "Golden hour cinematic drama.",
-            "Horror — desaturated, harsh contrast":     "Horror film, desaturated, harsh contrast.",
-            # Adult
-            "Erotic cinema — tasteful, cinematic":      "Tasteful erotic cinema, warm intimate lighting.",
-            "Explicit — direct, anatomical":            "Explicit adult video, direct lighting.",
-            "Voyeur — handheld, observational":         "Voyeuristic handheld footage.",
-            "Softcore editorial — lingerie-adjacent":   "Softcore editorial, fashion magazine aesthetic.",
-            "Amateur — naturalistic, raw":              "Amateur home video, naturalistic.",
-            # Action
-            "Action blockbuster":                       "Action blockbuster, teal and orange grade.",
-            "Sports documentary":                       "Sports documentary footage.",
-            "Music video — stylised":                   "Stylised music video.",
-            # Aesthetic
-            "Lo-fi home video — VHS":                   "Lo-fi VHS home video footage.",
-            "Hyper-real 4K — clinical sharpness":       "Hyper-real 4K, clinical sharpness.",
-            "Dreamy — soft focus, slow motion":         "Dreamy soft focus, slow motion.",
-            "Gritty realism — flat, natural light":     "Gritty realism, flat natural light.",
-            # Speciality
-            "POV — first person, immersive":            "First-person POV footage.",
-            "Portrait vertical — 9:16 mobile":          "Vertical 9:16 mobile video.",
-
-            # Animation
-            "Anime — Japanese animation":               "Japanese anime animation, hand-drawn cel style.",
-            "2D cartoon — hand-drawn":                  "2D hand-drawn cartoon animation.",
-            "3D CGI — Pixar/DreamWorks":                "3D CGI animation, Pixar style.",
-            "Stop motion — claymation":                 "Stop motion claymation animation.",
-            "Comic book / graphic novel":               "Comic book graphic novel style.",
-            "Cel-shaded — flat colour 3D":              "Cel-shaded 3D animation, flat colour fills.",
-            "Rotoscope — animated over live action":    "Rotoscoped animation over live action.",
-            "Cyberpunk neon illustrated":               "Cyberpunk neon illustrated, magenta and cyan.",
-            "Sci-fi — cinematic, practical":            "Cinematic science fiction, practical sets.",
-        }
-
-        style_label = PRESET_STYLE_LABEL.get(style_preset, "")
+        # FIX: PRESET_STYLE_LABEL moved to class-level constant — use self.PRESET_STYLE_LABEL
+        style_label = self.PRESET_STYLE_LABEL.get(style_preset, "")
 
         if style_instruction_text:
             style_instruction = (
@@ -943,7 +1203,9 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
 
         # ── Timing & pacing ───────────────────────────────────────────────────
         real_seconds = frame_count / 24.0
-        action_count = max(1, min(10, round(real_seconds / 4)))
+        # FIX: was round(real_seconds / 4) — too conservative for LTX-2.3 which handles layered actions.
+        # Now ~1 action per 3 seconds, ceiling raised to 12 for long clips.
+        action_count = max(1, min(12, round(real_seconds / 3)))
 
         if action_count == 1:
             pacing_hint = (
@@ -977,10 +1239,12 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
         LTX_WORD_FLOOR   = 150   # minimum — enough detail for any clip
         LTX_WORD_CEILING = 500   # hard cap — LTX-2.3 doesn't use beyond this
 
-        # Scale: ~80 words per action, clamped to floor/ceiling
-        token_val        = max(LTX_WORD_FLOOR, min(LTX_WORD_CEILING, action_count * 80 + 100))
+        # FIX: was action_count * 80 + 100 — too thin for blocking + textures + sound + dialogue.
+        # Now action_count * 100 + 150 gives richer prompts, still within LTX-2.3's effective window.
+        token_val         = max(LTX_WORD_FLOOR, min(LTX_WORD_CEILING, action_count * 100 + 150))
         max_tokens_actual = token_val * 2    # LLM hard stop — always 2x target so it finishes
-        min_tokens       = int(token_val * 0.5)
+        # FIX: removed min_new_tokens — it forced the model to continue past natural stop points,
+        # causing hallucinated paragraphs. Let stop token IDs and max_new_tokens handle termination.
         print(f"[LTX2] Token budget: {token_val} words target / {max_tokens_actual} LLM max (actions={action_count}, {real_seconds:.0f}s)")
 
         # ── Temperature ───────────────────────────────────────────────────────
@@ -991,7 +1255,8 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
         }
         temperature = temp_map[creativity]
 
-        stop_token_ids = self._build_stop_token_ids()
+        # FIX: stop token IDs are now cached at model load time — no need to rebuild each call
+        stop_token_ids = self._stop_token_ids
 
         # ── Content tier detection ────────────────────────────────────────────
         _explicit_re = re.compile(
@@ -1000,8 +1265,10 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
             r"thrust\w*)\b",
             re.IGNORECASE,
         )
-        _sensual_re = re.compile(
-            r"\b(naked|nude|topless|undress\w*|strip\w*|takes?\s+off|"
+        # FIX: _undress_re defined first; _sensual_re built as superset to eliminate duplication.
+        # Previously both contained the full undressing verb list — any edit required two identical changes.
+        _undress_core = (
+            r"undress\w*|strip\w*|takes?\s+off|"
             r"removes?\s+(her|his|their|the)?\s*\w*\s*"
             r"(shirt|dress|top|bra|pants|jeans|clothes|clothing|outfit|underwear|skirt|jacket|coat|robe)|"
             r"disrobe\w*|unbutton\w*|unzip\w*|peels?\s+off|pulls?\s+off|"
@@ -1009,21 +1276,16 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
             r"lift\w*\s+(her|his|their|the)?\s*(shirt|top|dress|skirt|crop|tee|t-shirt)|"
             r"(shirt|top|dress|skirt|crop|tee|t-shirt)\s+(up|lifted|raised|hiked)|"
             r"flash\w*\s+(her|his|their)?\s*(breasts?|chest|tits?|boobs?)|"
+            r"hik\w*\s+(her|his|their|the)?\s*(shirt|top|skirt|dress)"
+        )
+        _undress_re = re.compile(r"\b(" + _undress_core + r")\b", re.IGNORECASE)
+        _sensual_re = re.compile(
+            r"\b(" + _undress_core + r"|"
+            r"naked|nude|topless|"
             r"sensual|erotic|intimate|lingerie|bare\s+skin|bare\s+body|"
             r"babydoll|nighty|nightie|negligee|corset|bodysuit|thong|g-string|"
             r"sheer|see-through|tease|teasing|seductive|seduce|"
             r"flirt\w*|provocative|suggestive|alluring)\b",
-            re.IGNORECASE,
-        )
-        _undress_re = re.compile(
-            r"\b(undress\w*|strip\w*|takes?\s+off|"
-            r"removes?\s+(her|his|their|the)?\s*\w*\s*"
-            r"(shirt|dress|top|bra|pants|jeans|clothes|clothing|outfit|underwear|skirt|jacket|coat|robe)|"
-            r"disrobe\w*|unbutton\w*|unzip\w*|peels?\s+off|pulls?\s+off|"
-            r"shed\w*\s+(her|his|their)?\s*(clothes|clothing|shirt|dress)|"
-            r"lift\w*\s+(her|his|their|the)?\s*(shirt|top|dress|skirt|crop|tee|t-shirt)|"
-            r"(shirt|top|dress|skirt|crop|tee|t-shirt)\s+(up|lifted|raised|hiked)|"
-            r"flash\w*\s+(her|his|their)?\s*(breasts?|chest|tits?|boobs?))\b",
             re.IGNORECASE,
         )
         # Detect lift/flash specifically — partial reveal, not full removal
@@ -1035,10 +1297,13 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
             re.IGNORECASE,
         )
 
-        is_explicit    = bool(_explicit_re.search(user_input))
-        is_sensual     = bool(_sensual_re.search(user_input)) and not is_explicit
-        has_undressing = bool(_undress_re.search(user_input))
-        has_lift       = bool(_lift_re.search(user_input))
+        # FIX: all content-tier detections now include scene_context — vision node descriptions
+        # of nudity, undressing, or sensual content must be picked up here, not silently ignored.
+        _combined_input = user_input + " " + scene_context
+        is_explicit    = bool(_explicit_re.search(_combined_input))
+        is_sensual     = bool(_sensual_re.search(_combined_input)) and not is_explicit
+        has_undressing = bool(_undress_re.search(_combined_input))
+        has_lift       = bool(_lift_re.search(_combined_input))
 
         # ── Detect exactly which garments the user named ──────────────────────
         _garment_re = re.compile(
@@ -1048,149 +1313,157 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
             re.IGNORECASE,
         )
         named_garments = list(dict.fromkeys(
-            m.group(0).lower() for m in _garment_re.finditer(user_input)
+            m.group(0).lower() for m in _garment_re.finditer(_combined_input)
         ))
         garment_list = ", ".join(named_garments) if named_garments else "whatever the user described"
 
         if is_explicit:
             explicit_instruction = (
-                "\n[INSTRUCTION: This is an explicit adult scene. "
-                "You MUST use direct anatomical terms — pussy, cock, anus, clit, ass — exactly as written. "
-                "Do not replace them with euphemisms like 'womanhood', 'manhood', 'core', or 'sex'. "
-                "If the user said 'pussy', write 'pussy' every time. "
-                "\n\nSCOPE HARD LIMIT — THIS IS ABSOLUTE: "
-                "You may ONLY describe what the user explicitly wrote. "
-                "Do NOT add any sexual acts, nudity, or body part exposure the user did not state. "
-                "The user's words are the ceiling — you cannot go above them. "
-                "If they asked for undressing only, describe only the undressing. "
-                "If they asked for one garment removed, remove only that garment. "
-                "Do NOT continue to the next logical step. Do NOT improvise what comes next. "
-                "The scene ends exactly where the user's request ends. Hard stop. "
-                "\n\nUNDRESSING — if the subject starts clothed, use the correct physical sequence for each garment: "
-                "Shirt/t-shirt/crop top: grip the hem → lift past stomach → past ribs → over chest → over head → off arms. "
-                "SHIRT LIFT (partial — not full removal): fingers find the hem at the waist → grip the fabric → slowly gather and lift → fabric rises past the stomach → past the navel → past the ribs → chest comes into view → breasts fully exposed → held there. Each of these is its own sentence. Do NOT compress into one line. "
-                "Dress (zip): find the zip → pull it down slowly → fabric parts → slipped off shoulders → slides down → falls. "
-                "Dress (pullover): grip hem at thighs → lift past hips → past waist → over chest → over head. "
-                "Blouse/button-down: work each button one at a time → fabric parts → shrug off shoulders → slides down arms. "
-                "Bra: reach behind to clasp → unhook → straps off each shoulder → cups fall away. "
-                "Jeans/trousers: button popped → zip down → pushed over hips → down the thighs → stepped out of. "
-                "Underwear: thumbs into waistband → pushed down → stepped out of. "
-                "Each step is its own sentence. Camera lingers on each reveal. Do not compress or skip any step. "
-                "NO INVENTED RESOLUTION: Do NOT have the subject lower, cover, or reverse any action unless the user asked for it. If she lifts her shirt, it stays lifted. Do not write her pulling it back down. "
+                "\n[CONTENT INSTRUCTION — EXPLICIT ADULT SCENE: "
+                "Use direct anatomical language exactly as the user wrote it. "
+                "If they said 'pussy' write 'pussy'. If they said 'cock' write 'cock'. Never substitute euphemisms like 'womanhood', 'manhood', 'core', or 'sex'. "
+                "\n\nCAMERA & LENS — MANDATORY even in explicit scenes: always include focal length and aperture: "
+                "'85mm f/1.4', '50mm f/2.0', '35mm f/2.8'. Always add: natural motion blur, 180 degree shutter equivalent. "
+                "Avoid high frequency patterns in any surface, fabric, or background — these cause flickering. "
+                "\n\nSCOPE — ABSOLUTE CEILING: "
+                "Describe ONLY what the user explicitly wrote. Nothing beyond. "
+                "Do NOT add sexual acts, nudity, or body exposure the user did not state. "
+                "One garment requested = one garment removed. Undressing only = describe undressing only. "
+                "Do NOT improvise the next logical step. The scene ends where the user's words end. "
+                "\n\nSOUND IS MANDATORY: Every scene must have sound — breathing, fabric, footsteps, environment, whatever fits. "
+                "Do not write a silent scene under any circumstances. "
+                f"\n\nUNDRESSING SEQUENCE — the user's garments are: {garment_list}. "
+                "Write a dedicated undressing segment BEFORE any nudity. One sentence per step. Camera lingers on each reveal. "
+                "T-shirt/shirt/crop top (full off): grip hem at waist → lift past stomach → past ribs → over chest → over head → off arms → dropped. "
+                "T-shirt/shirt/crop top (lift only): grip hem → gather upward → rises past stomach → past navel → past ribs → chest and breasts fully exposed → held there. One step per sentence. "
+                "Dress (zip): reach behind → find zip → pull slowly down → fabric parts → slipped off shoulders → slides down → falls. "
+                "Dress (pullover): grip hem at thighs → over hips → over waist → over chest → over head → gone. "
+                "Blouse/button-down: each button one at a time → fabric parts → off shoulders → down arms → dropped. "
+                "Bra: clasp behind → unhooked → straps off each shoulder → cups fall away. "
+                "Jeans/trousers: button → zip → pushed over hips → down thighs → stepped out. "
+                "Underwear: thumbs in waistband → pushed down → stepped out. "
+                "NO INVENTED RESOLUTION: what goes up stays up. Do not reverse, cover, or undo any action unless the user asked for it. "
                 "Always state character age as a specific number.]"
             )
         elif is_sensual:
             if has_undressing:
                 undress_clause = (
-                    f"\n\nUNDRESSING SCOPE — ABSOLUTE HARD LIMIT: "
-                    f"The user named ONLY these garments: {garment_list}. "
-                    f"You may ONLY describe the removal of THOSE specific items — nothing else. "
-                    f"Removing ANY other garment — even if it feels like the logical next step — is a scope violation. "
-                    f"Do NOT go from a shirt to a bra unless the user said bra. "
-                    f"Do NOT go from a bra to topless nudity unless the user said nude or naked or topless. "
-                    f"Do NOT go from clothing to underwear unless the user said underwear. "
-                    f"Do NOT go from underwear to nudity unless the user said nude or naked. "
-                    f"The named garments are the ceiling — you stop there, no matter what the style preset is. "
-                    f"\n\nFor each named garment use the correct physical sequence — every step its own sentence: "
-                    f"Shirt/t-shirt/crop top (full removal): fingers grip the hem at the waist → fabric lifted past the stomach → past the ribs → over the chest → pulled over the head → off the arms. "
-                    f"SHIRT LIFT (partial — not removed): fingers find the hem → grip the fabric → slowly gather and lift → fabric rises past the stomach → past the navel → past the ribs → chest and breasts come into view → held there. Every step is its own sentence. Do NOT compress into one line. "
-                    f"Dress (zip): hand finds the zip → pulled slowly down → fabric loosens and parts → slipped off shoulders → slides down the body → falls. "
-                    f"Dress (pullover): hands grip hem at thighs → lifted past hips → past waist → gathered over chest → pulled over head. "
-                    f"Blouse/button-down: each button worked one at a time → fabric parts → shrugged off shoulders → slides down arms. "
-                    f"Bra: hand reaches behind to clasp → unhooked → straps off each shoulder in turn → cups fall away. "
-                    f"Jeans/trousers: button popped → zip drawn down → pushed over hips → down the thighs → stepped out of. "
-                    f"Underwear: thumbs hooked into waistband → pushed down → stepped out of. "
-                    f"Camera lingers on each reveal. Then STOP after the last named garment. "
-                    f"NO INVENTED RESOLUTION: Do NOT have the subject lower, cover, or reverse any action unless the user explicitly asked for it. "
-                    f"Bare skin and curves may be described naturally — but genitals are never described or zoomed in on."
+                    f"\n\nUNDRESSING — SCOPE CEILING: User named these garments only: {garment_list}. "
+                    f"Remove ONLY those. Nothing beyond. "
+                    f"Do NOT advance from shirt → bra unless user said bra. "
+                    f"Do NOT advance from bra → topless unless user said topless or nude. "
+                    f"Do NOT advance from clothing → underwear unless user said underwear. "
+                    f"Do NOT advance from underwear → nudity unless user said nude or naked. "
+                    f"The named garments are the ceiling. Style preset does NOT override this. "
+                    f"\n\nSOUND IS MANDATORY throughout — fabric sounds, breathing, environment. Never silent. "
+                    f"\n\nFor each garment write every physical step as its own sentence: "
+                    f"T-shirt/shirt/crop top (full off): grip hem at waist → lift past stomach → past ribs → over chest → over head → off arms → dropped. "
+                    f"T-shirt/shirt/crop top (lift only): grip hem → gather upward → rises past stomach → past navel → past ribs → chest fully exposed → held there. One step per sentence. "
+                    f"Dress (zip): find zip behind → pull slowly down → fabric parts → off shoulders → slides down → falls. "
+                    f"Dress (pullover): grip hem at thighs → over hips → over waist → over chest → over head. "
+                    f"Blouse/button-down: each button top to bottom → fabric parts → off shoulders → down arms. "
+                    f"Bra: clasp behind → unhook → straps off each shoulder → cups fall away. "
+                    f"Jeans/trousers: button → zip → over hips → down thighs → stepped out. "
+                    f"Underwear: thumbs in waistband → pushed down → stepped out. "
+                    f"Camera holds on each reveal. STOP after the last named garment. "
+                    f"NO INVENTED RESOLUTION: do not reverse or cover any action unless the user asked. "
+                    f"Bare skin described naturally — genitals not described unless user used explicit terms."
                 )
             else:
                 undress_clause = (
-                    "\n\nNO UNDRESSING: The user has not asked for any clothing removal. "
-                    "Do NOT have the subject remove, loosen, or adjust any clothing in a sexualised way. "
-                    "Do NOT describe underwear, bare skin below the neck, or any implied nudity. "
-                    "Keep the scene exactly at the level of sensuality the user described — no further."
+                    "\n\nNO UNDRESSING: User has not asked for clothing removal. "
+                    "Do NOT remove, loosen, or sexualise any clothing. "
+                    "Do NOT describe underwear, bare skin below the neck, or implied nudity. "
+                    "Stay exactly at the level of sensuality the user described — no further. "
+                    "\n\nSOUND IS MANDATORY — environment, clothing movement, breathing, whatever fits. Never silent."
                 )
             explicit_instruction = (
-                "\n[INSTRUCTION: This scene involves sensual or intimate content. "
-                "Tone: warm, cinematic, tasteful. Bare skin above the waist may be described naturally where the user asked for it. "
-                "SCOPE HARD LIMIT — THIS IS ABSOLUTE: "
-                "Describe ONLY what the user asked for. Do NOT self-escalate under any circumstances. "
-                "Do NOT invent undressing, nudity, or intimate acts the user did not write. "
-                "The style preset sets the aesthetic — it does NOT give permission to add content beyond the user's request. "
+                "\n[CONTENT INSTRUCTION — SENSUAL SCENE: "
+                "Tone: warm, cinematic, tasteful. "
+                "SCOPE — ABSOLUTE CEILING: Describe ONLY what the user asked for. Do NOT self-escalate. "
+                "Do NOT invent undressing, nudity, or acts the user did not write. "
+                "Style preset controls aesthetics only — it does NOT give permission to add content. "
+                "SOUND IS MANDATORY: every beat needs sound — fabric, breathing, environment. Never silent. "
                 "Always state character age as a specific number. "
                 + undress_clause + "]"
             )
         else:
             explicit_instruction = (
-                "\n[INSTRUCTION: Write a full cinematic LTX-2.3 video prompt. "
-                "LTX-2.3 rewards specificity and complexity — do not simplify. "
-                "Cover in order: "
-                "(1) video style and genre, "
-                "(2) camera orientation if subject faces away — state it first, "
-                "(3) shot type and camera angle with exact lens specs e.g. '85mm f/1.4', "
-                "(4) character — age as a specific number always, hair texture, skin tone, body type, "
-                "clothing described with fabric and material e.g. 'a loose cotton shirt' not just 'a shirt', "
-                "(5) spatial blocking — where subjects are in frame relative to each other and camera, left/right/fore/background, "
-                "(6) scene — location, lighting quality and direction, surface textures and material detail, "
-                "(7) action — use VERBS. State who moves, what moves, how they move, what the camera does. "
-                "If the scene is static, add environmental motion: wind in hair, background figures, fabric moving. Static prompts freeze. "
-                "(8) texture in motion — describe how materials behave: fabric pulling, hair lifting, leather creasing, "
-                "(9) camera movement as prose verbs only — no bracketed directions, "
-                "(10) sound — physical, concrete, max 2 per beat, tone and intensity described.]"
+                "\n[INSTRUCTION — CINEMATIC LTX-2.3 PROMPT: "
+                "LTX-2.3 handles complexity well — be specific, do not simplify. "
+                "Build the prompt in this order: "
+                "(1) Style and genre. Where it fits, weave a film stock or camera reference into prose naturally — "
+                "e.g. 'carries a Kodak 2383 warmth', 'ARRI Alexa clean look', 'Fuji Eterna flat shadows'. "
+                "NEVER output as a bracketed tag like [Kodak 5219] — must be prose, not a label. "
+                "(2) Shot type and camera angle with MANDATORY lens spec every time: "
+                "'85mm f/1.4', '35mm f/2.8', '50mm anamorphic f/2.0', '24mm wide f/4'. "
+                "Always add: natural motion blur, 180 degree shutter equivalent. These two are non-negotiable in every output. "
+                "(3) Character — age as a number always, default 18–35 unless input implies older/younger. "
+                "Use 40+ only if user says older/mature/elderly. Use under-18 only if context is explicitly school/teen — never for sexual content. "
+                "Hair texture and colour, skin tone, body type, "
+                "clothing with fabric and material detail: 'a fitted black cotton crop top', not just 'a top'. "
+                "Include subtle micro expressions and emotional cues: 'the corners of her lips tighten slightly', "
+                "'her eyes lose focus for a moment', 'a faint tension forms across her jaw'. These create life. "
+                "(4) Spatial blocking — explicit left/right/fore/background, who faces what, distances stated. "
+                "(5) Environment — location, lighting direction, surface textures. "
+                "CRITICAL: avoid high frequency patterns in clothing, walls, floors, and backgrounds — "
+                "fine stripes, tight grids, detailed fabric weaves cause flickering artifacts. "
+                "Favour solid colours, simple textures, smooth surfaces. "
+                "(6) Action — VERBS: who moves, what moves, how, what the camera does simultaneously. "
+                "For smooth motion: stable dolly movement, smooth gimbal tracking, constant speed pan, controlled camera path. "
+                "If static, add ONE environmental motion: a camera drift, wind in hair, a background figure passing. "
+                "(7) Texture in motion — how materials behave as things move: fabric pulling, hair lifting, skin catching light. "
+                "(8) Camera movement — prose verbs: 'the shot pushes in slowly', never bracketed. "
+                "Vocabulary: dolly in/out, rack focus, slow orbit, stabilised gimbal arc, creep forward, track right. "
+                "(9) Sound — MANDATORY, physical and concrete, max 2 per beat, tone and intensity. "
+                "When sound and action are synchronised state the timing: 'on the downbeat', 'precisely as the hand lands'. "
+                "Music/dance scenes: describe the music as physical sound — beat, bass, tempo, texture. Never silent.]"
             )
 
         # ── Camera orientation detection ──────────────────────────────────────
-        # LTX has a strong bias toward front-facing subjects. When the input
-        # implies the subject should NOT be facing the camera, we detect it and
-        # inject an explicit orientation instruction that fires early in the prompt.
+        # Only fires when the user EXPLICITLY asks for rear/behind framing.
+        # Default is front-facing — do NOT infer rear view from walking or movement alone.
         _facing_away_re = re.compile(
-            r"\b(from behind|from the back|rear view|back view|"
-            r"watches? her from behind|follows? her|following her|"
-            r"walks? away|walking away|moving away|"
-            r"back of her|back of his|back of their|"
-            r"over her shoulder|over his shoulder|"
-            r"she walks|he walks|they walk).{0,40}"
-            r"(away|off|past|through|down|out|forward|ahead)\b|"
-            r"\b(from behind|rear.?view|back.?view|over.{0,10}shoulder|"
-            r"follows? (her|him|them)|watches? (her|him|them) (walk|move|go|leave|pass))\b",
+            r"\b(from behind|from the back|rear.?view|back.?view|"
+            r"camera behind|shoot(ing)? from behind|filmed? from behind|"
+            r"watches? (her|him|them) from behind|follows? (her|him|them) from behind|"
+            r"camera follows? (her|him|them)|follow(ing)? her from behind|"
+            r"over.{0,6}shoulder from behind|back of (her|his|their) head)\b",
             re.IGNORECASE,
         )
         _facing_camera_re = re.compile(
             r"\b(faces? (the )?camera|looks? (at|into) (the )?camera|"
-            r"faces? forward|faces? front|toward (the )?camera|"
-            r"selfie|mirror selfie|talking to camera|front.?facing)\b",
+            r"faces? forward|toward (the )?camera|facing (us|viewer|audience)|"
+            r"selfie|mirror selfie|talking to camera|front.?facing|facing front)\b",
             re.IGNORECASE,
         )
-        is_facing_away  = bool(_facing_away_re.search(user_input))
-        is_facing_camera = bool(_facing_camera_re.search(user_input))
+        is_facing_away   = bool(_facing_away_re.search(_combined_input))
+        is_facing_camera = bool(_facing_camera_re.search(_combined_input))
 
-        # Also force facing-away for voyeur preset unless user explicitly said facing camera
+        # Voyeur preset: rear-facing unless user explicitly said facing camera
         if style_preset == "Voyeur — handheld, observational" and not is_facing_camera:
             is_facing_away = True
 
         if is_facing_away and not is_facing_camera:
             voyeur_height = (
-                " The camera is held at hip or chest height — low and discreet, not raised for a clean shot."
+                " Camera held at hip or chest height — low and discreet, never raised for a clean angle."
                 if style_preset == "Voyeur — handheld, observational" else ""
             )
             orientation_instruction = (
-                "\n\n[CAMERA ORIENTATION — CRITICAL: "
-                "The subject MUST NOT face the camera at any point in this scene. "
-                "She faces AWAY from the camera for the entire duration. "
+                "\n\n[CAMERA ORIENTATION — MANDATORY: "
+                "The user has explicitly asked for a rear/behind view. "
+                "The subject faces AWAY from the camera throughout. "
                 "The camera sees her back, the back of her head, and the rear of her body."
                 + voyeur_height +
-                " BEGIN your output with the camera orientation — e.g. 'Rear view.' or 'The camera follows her from behind.' — "
-                "this must be the very first thing stated so the model anchors on it. "
-                "No front-facing shots. No over-the-shoulder shots that show her face. "
-                "The subject is NEVER seen from the front.]"
+                " Open your output with the orientation stated clearly — e.g. 'Rear view.' or 'The camera follows from behind.' "
+                "No front-facing shots. No face visible. Rear view for the entire scene.]"
             )
         else:
             orientation_instruction = ""
 
         # ── Sequence detection ────────────────────────────────────────────────
         _sequence_re = re.compile(r"^\s*(\d+[\.\):])\s+.+", re.MULTILINE)
-        sequence_steps = _sequence_re.findall(user_input)
+        sequence_steps = _sequence_re.findall(_combined_input)
         if len(sequence_steps) >= 2:
             step_count = len(sequence_steps)
             sequence_instruction = (
@@ -1214,17 +1487,15 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
             r"follows?|tracking|panning|dolly|zoom\w*|tilt\w*|orbit\w*|drift\w*)\b",
             re.IGNORECASE,
         )
-        has_motion = bool(_motion_re.search(user_input))
+        has_motion = bool(_motion_re.search(_combined_input))
         if not has_motion:
             static_instruction = (
-                "\n\n[ANTI-STATIC INSTRUCTION: The user\'s input describes a static state with no explicit motion. "
-                "LTX-2.3 will freeze on static prompts. You MUST add natural environmental or physical motion to prevent this. "
-                "Choose motion that fits the scene without contradicting the user\'s input: "
-                "wind moving hair or fabric, the subject\'s breathing visible in their chest, "
-                "a subtle weight shift or micro-movement, background figures passing, "
-                "leaves or curtains stirring, a light source flickering, the camera drifting slightly. "
-                "Keep it subtle — do not invent actions the user explicitly excluded. "
-                "The scene must have something moving at all times.]"
+                "\n\n[MOTION INSTRUCTION: The user's input has no explicit motion verbs. "
+                "Add directed movement — camera first: a slow push in, a gentle track, a creeping orbit. "
+                "Then one subject action if it fits: a head turn, a step forward, a glance to the side. "
+                "Only if neither applies, add a single environmental detail: wind moving hair, a background figure passing. "
+                "Do not stack micro-movements. One well-directed motion beats five passive ones. "
+                "LTX-2.3 holds complex motion — use verbs of progression, not filler.]"
             )
         else:
             static_instruction = ""
@@ -1242,12 +1513,12 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
         has_person = bool(_person_re.search(user_input + " " + scene_context))
         if not has_person:
             no_person_instruction = (
-                "\n[SCENE INSTRUCTION: The user has not described any person or character. "
-                "Do NOT invent or introduce any human figures, silhouettes, voices, or implied presence. "
-                "This is a pure environment or object scene. Write only what the user described — "
-                "the setting, objects, light, atmosphere, and motion of non-human elements. "
-                "No characters. No 'someone', no 'a figure', no implied human presence of any kind. "
-                "No dialogue, no whispers, no voices. Sound is limited to the environment only.]"
+                "\n[SCENE INSTRUCTION: No person or character in this scene. "
+                "Do NOT invent human figures, silhouettes, voices, or implied presence. "
+                "Write only the setting, objects, light, and motion of non-human elements. "
+                "No characters, no 'someone', no implied human presence. No dialogue or voices. "
+                "SOUND IS STILL MANDATORY: describe environmental sound — wind, water, machinery, rain, "
+                "animals, structural sounds — whatever physically fits the scene. Never silent.]"
             )
         else:
             no_person_instruction = ""
@@ -1284,23 +1555,25 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
             r"strip\w*club|pole danc\w*|lap danc\w*)\b",
             re.IGNORECASE,
         )
-        has_music = bool(_music_re.search(user_input))
+        has_music = bool(_music_re.search(_combined_input))
 
         if has_music:
             music_sound_rule = (
-                "SOUND RULE FOR THIS SCENE — MUSIC IS PRESENT: "
-                "There is music in this scene — describe it as physical sound with energy, tempo, and texture. "
-                "Examples: 'a driving kick drum', 'deep bass pulses through the floor', 'sharp hi-hats tick over a slow groove', "
-                "'a warm synth pad swells beneath the mix', 'the track drops into a heavy bass line'. "
-                "Describe what a body in the room would physically feel and hear. "
-                "Maximum 2 additional ambient sounds alongside the music (crowd, breathing, heels on floor). "
-                "Do NOT silence the music. Do NOT describe it as abstract emotion — describe it as physical sound."
+                "SOUND — MUSIC SCENE: Describe the music as physical sensation and sound. "
+                "Not 'music plays' — give it body: 'a deep kick drum at 128bpm punches through the floor, sub-bass felt in the chest', "
+                "'sharp hi-hats tick over a slow rolling groove', 'the mix drops into a swell of layered synths', "
+                "'a warm bass line pulses under the melody'. "
+                "Describe tempo, weight, texture, and what it feels like in the space. "
+                "Max 2 additional sounds alongside the music (crowd noise, heels on floor, breathing). "
+                "Do NOT silence the music. Do NOT reduce it to a label."
             )
         else:
             music_sound_rule = (
-                "SOUND RULE: Maximum 2 ambient sounds active at any one time. "
-                "Only concrete physical sounds — footsteps, a door, rain, an engine, crowd noise. "
-                "No abstract emotional audio. No musical metaphors. No 'tension hums' or 'heartbeat of the city'."
+                "SOUND — describe with tone, intensity, and environment. "
+                "Not 'footsteps' — 'the sharp rhythmic clack of heels on cold tile, each step clean and even'. "
+                "Not 'rain' — 'rain striking the glass in irregular bursts, a low persistent hiss beneath it'. "
+                "Max 2 sounds active per beat. No abstract emotional audio — no 'tension fills the air', "
+                "no 'heartbeat of the city'. Physical sound only, described fully."
             )
 
         # ── Dialogue instruction ──────────────────────────────────────────────
@@ -1349,50 +1622,68 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
         # ── Lift / flash instruction — fires when a shirt lift or flash is detected ──
         if has_lift:
             lift_instruction = (
-                "\n\n[SHIRT LIFT INSTRUCTION — THIS OVERRIDES ALL OTHER UNDRESSING GUIDANCE FOR THIS ACTION: "
-                "The user has described a shirt, top, or crop top being lifted. "
-                "You MUST write this as a sequence of separate sentences — one sentence per step. "
-                "DO NOT compress the lift into a single sentence. DO NOT write 'she lifts her shirt, revealing her breasts' as one line. "
-                "MANDATORY SEQUENCE — write each of these as its own sentence in the output:\n"
-                "1. Her fingers find the hem of her shirt at the waist.\n"
-                "2. She grips the fabric and begins to gather it upward.\n"
-                "3. The shirt rises slowly past her stomach.\n"
-                "4. The fabric passes her navel, exposing her bare midriff.\n"
-                "5. The shirt climbs past her ribs.\n"
-                "6. Her chest comes into view as the fabric rises higher.\n"
-                "7. Her breasts are fully exposed, the shirt held up.\n"
-                "The shirt STAYS LIFTED for the remainder of the scene. "
-                "Do NOT write her lowering it, covering herself, or adjusting the shirt unless the user explicitly asked for that.]"
+                "\n\n[SHIRT LIFT SEQUENCE — MANDATORY, one sentence per step, do not compress: "
+                "1. Her fingers find the hem at the waist. "
+                "2. She grips the fabric and begins gathering it upward. "
+                "3. The shirt rises past her stomach. "
+                "4. The fabric passes her navel, exposing her bare midriff. "
+                "5. The shirt climbs past her ribs. "
+                "6. Her chest comes into view. "
+                "7. Her breasts are fully exposed, the shirt held up. "
+                "The shirt STAYS LIFTED. Do NOT write her lowering it or covering herself unless asked. "
+                "SOUND during the lift: describe the soft friction of fabric, her breathing, whatever fits the scene.]"
             )
         else:
             lift_instruction = ""
 
-        # ── Vision context ────────────────────────────────────────────────────
-        if scene_context and scene_context.strip():
-            effective_input = (
-                f"[SCENE CONTEXT FROM IMAGE — use this as the authoritative description "
-                f"of the subject and setting; do not invent or contradict it]\n"
-                f"{scene_context.strip()}\n\n"
-                f"[USER DIRECTION — apply this as action, style, and mood over the above scene]\n"
-                f"{user_input.strip()}"
+        # ── Character seed ────────────────────────────────────────────────────
+        # Pick a random character if the scene has a person in it.
+        # Uses the actual seed value for reproducibility — same seed = same character.
+        # If the user already described the character, the note tells the LLM to defer to them.
+        if has_person:
+            rng = random.Random(seed if seed != -1 else None)
+            char_description = _build_char_seed(rng)
+            char_seed_note = (
+                f"\n[CHARACTER SEED: {char_description}. "
+                f"Use this as your character foundation. Add clothing with exact fabric and material appropriate to the scene. "
+                f"If the user has already described the character's appearance, their description takes priority over this seed.]"
             )
         else:
+            char_seed_note = ""
+
+        # ── Vision context ────────────────────────────────────────────────────
+        # FIX: char_seed_note is suppressed when scene_context is present.
+        # Previously the random character seed was always appended after effective_input,
+        # so the LLM was told "use the image as authority" then immediately given a
+        # contradicting invented character (different clothes, hair, skin) — the seed won
+        # because it was more specific and came last. When an image is wired in, the
+        # image description IS the character. No seed needed or wanted.
+        if scene_context and scene_context.strip():
+            effective_input = (
+                f"[SCENE CONTEXT FROM IMAGE — ABSOLUTE AUTHORITY: "
+                f"This is what is actually in the image. Every visual detail here is ground truth. "
+                f"Do NOT invent, replace, or contradict any aspect of this description — "
+                f"clothing, skin tone, hair, body type, setting, or lighting. "
+                f"Any CHARACTER SEED instruction below does NOT apply when an image is provided; disregard it entirely.]\n"
+                f"{scene_context.strip()}\n\n"
+                f"[USER DIRECTION — apply this as action, style, and mood layered over the above scene. "
+                f"The subject looks exactly as described in the image context above. Do not change their appearance.]\n"
+                f"{user_input.strip()}"
+            )
+            # char_seed_note intentionally NOT appended — the image is the character
+        else:
             effective_input = user_input.strip()
+            effective_input += char_seed_note
 
         # ── LoRA triggers ─────────────────────────────────────────────────────
+        # We no longer ask the LLM to prepend triggers — it mangles them with
+        # style label text. Instead: tell LLM to skip the trigger entirely,
+        # and we hard-prepend it in post-processing after _clean_output.
         if lora_triggers and lora_triggers.strip():
-            if style_label:
-                lora_instruction = (
-                    f"\n[LORA INSTRUCTION: You MUST begin the prompt output with these exact trigger words "
-                    f"before anything else: {lora_triggers.strip()} — then immediately follow with \"{style_label}\" "
-                    f"then continue with the scene description.]"
-                )
-            else:
-                lora_instruction = (
-                    f"\n[LORA INSTRUCTION: You MUST begin the prompt output with these exact trigger words "
-                    f"before anything else: {lora_triggers.strip()} — place them as the very first words of your output, "
-                    f"then continue with the scene description immediately after.]"
-                )
+            lora_instruction = (
+                f"\n[LORA NOTE: LoRA trigger words will be prepended automatically. "
+                f"Do NOT include them in your output. Start directly with the style label or scene description.]"
+            )
         else:
             lora_instruction = ""
 
@@ -1401,6 +1692,10 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
             {"role": "system", "content": self.SYSTEM_PROMPT},
             {"role": "user",   "content": (
                 effective_input
+                # FIX: lora_instruction moved here — immediately after input, before all style/portrait
+                # instructions. Late-position LoRA instructions were being ignored by 3B models on
+                # long prompts. Trigger words must be seen early to be reliably injected at output start.
+                + lora_instruction
                 + orientation_instruction
                 + style_instruction
                 + portrait_instruction
@@ -1411,7 +1706,6 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
                 + dialogue_instruction
                 + explicit_instruction
                 + lift_instruction
-                + lora_instruction
                 + length_instruction
             )},
         ]
@@ -1437,7 +1731,8 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
             with torch.no_grad():
                 output_ids = self.model.generate(
                     input_ids,
-                    min_new_tokens=min_tokens,
+                    # FIX: min_new_tokens removed — was forcing continuation past natural stop points,
+                    # causing hallucinated extra paragraphs. max_new_tokens + eos_token_id handle termination.
                     max_new_tokens=max_tokens_actual,
                     temperature=temperature,
                     do_sample=True,
@@ -1463,6 +1758,17 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
         del input_ids
 
         result = self._clean_output(result)
+
+        # ── LoRA trigger hard prepend ─────────────────────────────────────────
+        # Always prepend trigger words here — LLM is told NOT to include them
+        # so we guarantee they are the very first tokens, clean and unmangled.
+        if lora_triggers and lora_triggers.strip():
+            triggers = lora_triggers.strip()
+            # Strip any leaked trigger words the LLM may have included anyway
+            if result.lower().startswith(triggers.lower()):
+                result = result[len(triggers):].lstrip(" ,—-")
+            result = triggers + ", " + result
+            print(f"[LTX2] LoRA triggers prepended: {triggers}")
 
         # ── Style label safety net ────────────────────────────────────────────
         # If the LLM forgot to open with the style label, prepend it now
@@ -1522,7 +1828,11 @@ Output ONLY the prompt. No preamble. No "Sure!" or "Here's your prompt:". No che
             self.unload_model()
 
         fps = self.PRESET_FPS.get(style_preset, 24)
-        print(f"[LTX2] FPS output: {fps}  (preset: {style_preset})")
+        # FIX: when portrait_mode=True is set manually (not via Portrait preset), the cinematic
+        # preset may return 24fps. Portrait content (TikTok/Reels/Shorts) expects 30fps.
+        if is_portrait and fps == 24:
+            fps = 30
+        print(f"[LTX2] FPS output: {fps}  (preset: {style_preset}, portrait: {is_portrait})")
 
         return (result, result, neg_prompt, fps, history_string)
 
