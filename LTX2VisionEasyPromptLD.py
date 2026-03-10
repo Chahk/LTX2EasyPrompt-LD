@@ -205,20 +205,75 @@ class LTX2VisionDescribe:
         print(f"[VisionDescribe] Output: {len(description.split())} words.")
 
         # ── Unload immediately to free VRAM for the text node ─────────────────
-        print("[VisionDescribe] Unloading to free VRAM...")
+        print("[VisionDescribe] Unloading — full hard VRAM free...")
+
+        # Step 1: destroy every tensor in place so CUDA allocator releases pages
+        if _INSTANCE["model"] is not None:
+            try:
+                for _name, module in list(_INSTANCE["model"].named_modules()):
+                    for _pname, param in list(module.named_parameters(recurse=False)):
+                        try:
+                            param.data = torch.empty(0)
+                        except Exception:
+                            pass
+                    for _bname, buf in list(module.named_buffers(recurse=False)):
+                        try:
+                            module._buffers[_bname] = None
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"[VisionDescribe] Tensor destroy warning: {e}")
+
+        # Step 2: delete Python references
         try:
-            _INSTANCE["model"].to("cpu")
+            del _INSTANCE["model"]
         except Exception:
             pass
+        try:
+            del _INSTANCE["processor"]
+        except Exception:
+            pass
+
         _INSTANCE["model"]     = None
         _INSTANCE["processor"] = None
         _INSTANCE["source"]    = None
+
+        # Step 3: triple gc — catches circular refs from transformers internals
         gc.collect()
+        gc.collect()
+        gc.collect()
+
+        # Step 4: full CUDA flush — same sequence as EasyPromptLD
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-        print("[VisionDescribe] VRAM cleared.")
+            try:
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+                # Reset the caching allocator — releases "reserved but not allocated" block
+                torch.cuda.reset_peak_memory_stats()
+                torch.cuda.empty_cache()
+            except Exception as e:
+                print(f"[VisionDescribe] CUDA flush warning: {e}")
+
+        # Step 5: tell ComfyUI model manager to drop everything it holds too
+        try:
+            import comfy.model_management as mm
+            mm.unload_all_models()
+            mm.soft_empty_cache()
+            print("[VisionDescribe] ComfyUI mm.unload_all_models + soft_empty_cache done.")
+        except Exception as e:
+            print(f"[VisionDescribe] ComfyUI mm call skipped: {e}")
+
+        # Step 6: log final VRAM state
+        if torch.cuda.is_available():
+            try:
+                allocated = torch.cuda.memory_allocated() / 1024**3
+                reserved  = torch.cuda.memory_reserved()  / 1024**3
+                print(f"[VisionDescribe] VRAM after free: {allocated:.2f}GB allocated / {reserved:.2f}GB reserved")
+            except Exception:
+                pass
+        else:
+            print("[VisionDescribe] Model unloaded (no CUDA).")
 
         return (description,)
 
