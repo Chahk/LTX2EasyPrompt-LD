@@ -367,6 +367,10 @@ class LTX2PromptArchitect:
                 }),
             },
             "optional": {
+                "use_scene_context": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Enable or disable scene_context without disconnecting the wire. Turn OFF to use your text input only and ignore the wired vision description."
+                }),
                 "scene_context": ("STRING", {
                     "default": "",
                     "multiline": True,
@@ -739,7 +743,7 @@ Do NOT default to rear view just because the subject is walking or moving. A wom
 SCENE DIRECTION — build the prompt in this order:
 1. Style & genre — use the STYLE INSTRUCTION as the aesthetic anchor. Where it fits the mood, weave a film stock or camera system reference into the prose naturally — e.g. 'the image carries a Kodak 2383 warmth', 'shot on an ARRI Alexa, clean and clinical', 'Fuji Eterna desaturation flattens the shadows'. NEVER output film stock as a bracketed tag or prefix like [Kodak 5219]. It must read as part of a sentence, not a label.
 2. Shot type & camera angle — specific cinematographic terms: medium close-up, OTS, Dutch angle, bird's-eye, tracking shot. Never vague.
-3. Lens & optics — ALWAYS include focal length AND aperture in every prompt: "85mm f/1.4", "35mm f/2.8", "50mm anamorphic equivalent f/2.0", "24mm wide f/4". This is non-negotiable — it controls depth, edge sharpness, and spatial compression. Also specify: natural motion blur, 180 degree shutter equivalent. These two phrases are mandatory in every prompt — they prevent unnatural movement at all frame rates.
+3. Lens & optics — ALWAYS include focal length AND aperture in every prompt: "85mm f/1.4", "35mm f/2.8", "50mm anamorphic equivalent f/2.0", "24mm wide f/4". This is non-negotiable — it controls depth, edge sharpness, and spatial compression. Also include: natural motion blur, 180 degree shutter equivalent — mandatory in every prompt. CRITICAL: Lens, motion blur, and shutter must be woven into the prose as part of a sentence — NEVER output them as a labelled appendix like "Lens: 50mm f/2.0." or "Camera angle: medium close-up." at the end. Wrong: "...she looks away. Lens: 50mm f/2.0, natural motion blur." Right: "...the camera, a 50mm f/2.0, slowly pushes in, natural motion blur and 180-degree shutter equivalent rendering her movement fluid."
 4. Character — ALWAYS state age as a specific number e.g. "a 27-year-old woman". Default age range is 18–35 unless the user's input implies otherwise. Only use ages 40+ if the user mentions words like "older", "mature", "middle-aged", "elderly", "old man", "old woman". Only use child/teen ages (under 18) if the user's input explicitly places the character in a school, childhood, or teen context — and NEVER assign child/teen ages to any sexual or suggestive content. Then: hair texture and colour, skin tone, body type, clothing described with fabric and material ("a fitted black cotton crop top", "worn light-wash denim jeans", "a loose cream silk blouse"). Use the exact words the user used for body parts. Include subtle emotional cues and micro expressions: "the corners of her lips tighten slightly", "her eyes momentarily lose focus", "a faint crease forms between her brows". These create depth and life in the character.
 5. Scene & environment — location, time of day, lighting quality and direction, colour temperature, surface textures ("scuffed hardwood floor", "rain-streaked glass", "warm tungsten interior"). Only what the user described. Avoid high frequency visual patterns in clothing, backgrounds, and surfaces — these cause flickering artifacts. Favour solid colours, simple textures, and smooth surfaces.
 6. Spatial blocking — MANDATORY and explicit. Define: left/right position, foreground/background depth, approximate distance between subjects, who faces what. "She stands centre-left in the foreground, facing camera. He sits two metres behind her at the right edge of frame, slightly soft." For single subjects: anchor them in frame — "She stands centre-frame, mid-shot, facing camera, the background three metres behind her." Block every scene like a director.
@@ -756,7 +760,7 @@ SOUND — always present, always described:
 - Never use [AMBIENT: ...] tags. No abstract emotional audio — no "tension fills the air", no "heartbeat of the city".
 
 CRITICAL RULES:
-- NEVER write scene endings. Prompts describe ongoing action, not conclusions. Never use: "the scene ends", "the shot ends", "comes to a close", "fades to black", "the camera cuts", "hard stop", "scene closes", "camera lingers on the final". The scene is always mid-action.
+- NEVER write scene endings or closing paragraphs. Prompts describe ongoing action, not conclusions. Never use: "the scene ends", "the shot ends", "comes to a close", "fades to black", "the camera cuts", "hard stop", "scene closes", "camera lingers on the final". Also forbidden: winding-down final sentences that summarise the mood and close the scene — e.g. "In this peaceful moment, the world fades, leaving only...", "...and the quiet satisfaction of a perfect morning ritual.", "...the only sound the gentle hum of...", "...nothing remains but...". These are scene closings dressed as prose. Cut before them. The scene is always mid-action, never concluding.
 - NEVER invent additional characters. If the user describes one person, there is one person. If the user describes two people, there are two. Do NOT add bystanders, passers-by, partners, or observers unless the user explicitly wrote them into the scene.
 
 DIALOGUE — follow the DIALOGUE INSTRUCTION exactly. Inline prose with attribution. No [DIALOGUE: ...] tags.
@@ -1053,6 +1057,12 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
         text = re.sub(r"\[AMBIENT:\s*([^\]]*)\]", r"\1", text, flags=re.IGNORECASE).strip()
         # Strip bracketed film stock / camera tags the LLM sometimes outputs as labels
         text = re.sub(r"\[(Kodak|ARRI|Fuji|Film stock|film stock)[^\]]{0,80}\]\s*", "", text, flags=re.IGNORECASE).strip()
+        # Strip labelled technical appendix lines the LLM sometimes adds at the end
+        # e.g. "Lens: 50mm f/2.0, natural motion blur." or "Camera angle: medium close-up."
+        text = re.sub(
+            r"\b(Lens|Camera angle|Focal length|Shutter|Motion blur|Aperture)\s*:\s*[^.\n]{5,120}[.\n]?\s*$",
+            "", text, flags=re.IGNORECASE
+        ).strip()
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
         # Strip inline parenthetical annotation leaks e.g. (camera angle: bird's-eye), (genre: nature, style: drone)
@@ -1067,6 +1077,26 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
 
         # Strip trailing lone bracket
         text = re.sub(r'\s*[\(\[]\s*$', '', text).strip()
+
+        # Strip trailing poetic wind-down / closing paragraph
+        # Catches: "In this peaceful moment, the world fades, leaving only..."
+        # and "...the quiet satisfaction of a perfect morning ritual." style closings
+        text = re.sub(
+            r',?\s*(In this (peaceful|serene|quiet|tender|intimate|still|languid|tranquil|soft) (moment|scene|instant)[^.]{0,200}\.)\s*$',
+            "", text, flags=re.IGNORECASE | re.DOTALL
+        ).strip()
+        text = re.sub(
+            r'[,.]?\s*(leaving only (the [a-z ]{3,60}(of|and)[^.]{3,80})\.?)\s*$',
+            ".", text, flags=re.IGNORECASE
+        ).strip()
+        text = re.sub(
+            r'[,.]?\s*(the (quiet|soft|gentle|only) (satisfaction|warmth|rhythm|rustle|hum|sound|glow) of [^.]{5,80}\.)\s*$',
+            ".", text, flags=re.IGNORECASE
+        ).strip()
+        text = re.sub(
+            r'[,.]?\s*((nothing|no[- ]one) remains? (but|except) [^.]{5,80}\.)\s*$',
+            ".", text, flags=re.IGNORECASE
+        ).strip()
 
         # Catch "The scene ends there" leaking mid-prose after a sentence
         text = re.sub(r'\.\s+The scene ends there[^.]*\.', '.', text, flags=re.IGNORECASE).strip()
@@ -1115,6 +1145,7 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
         portrait_mode=False,
         scene_context="",
         lora_triggers="",
+        use_scene_context=True,
     ):
         # ── Bypass mode ──────────────────────────────────────────────────────
         if bypass:
@@ -1299,7 +1330,8 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
 
         # FIX: all content-tier detections now include scene_context — vision node descriptions
         # of nudity, undressing, or sensual content must be picked up here, not silently ignored.
-        _combined_input = user_input + " " + scene_context
+        _active_scene_context = scene_context if use_scene_context else ""
+        _combined_input = user_input + " " + _active_scene_context
         is_explicit    = bool(_explicit_re.search(_combined_input))
         is_sensual     = bool(_sensual_re.search(_combined_input)) and not is_explicit
         has_undressing = bool(_undress_re.search(_combined_input))
@@ -1397,7 +1429,8 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
                 "NEVER output as a bracketed tag like [Kodak 5219] — must be prose, not a label. "
                 "(2) Shot type and camera angle with MANDATORY lens spec every time: "
                 "'85mm f/1.4', '35mm f/2.8', '50mm anamorphic f/2.0', '24mm wide f/4'. "
-                "Always add: natural motion blur, 180 degree shutter equivalent. These two are non-negotiable in every output. "
+                "Always add: natural motion blur, 180 degree shutter equivalent — non-negotiable in every output. "
+                "CRITICAL: Weave lens and shutter INTO the prose — NEVER as a labelled ending like 'Lens: 50mm f/2.0' or 'Camera angle: close-up' appended at the end. "
                 "(3) Character — age as a number always, default 18–35 unless input implies older/younger. "
                 "Use 40+ only if user says older/mature/elderly. Use under-18 only if context is explicitly school/teen — never for sexual content. "
                 "Hair texture and colour, skin tone, body type, "
@@ -1658,14 +1691,14 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
         # contradicting invented character (different clothes, hair, skin) — the seed won
         # because it was more specific and came last. When an image is wired in, the
         # image description IS the character. No seed needed or wanted.
-        if scene_context and scene_context.strip():
+        if _active_scene_context and _active_scene_context.strip():
             effective_input = (
                 f"[SCENE CONTEXT FROM IMAGE — ABSOLUTE AUTHORITY: "
                 f"This is what is actually in the image. Every visual detail here is ground truth. "
                 f"Do NOT invent, replace, or contradict any aspect of this description — "
                 f"clothing, skin tone, hair, body type, setting, or lighting. "
                 f"Any CHARACTER SEED instruction below does NOT apply when an image is provided; disregard it entirely.]\n"
-                f"{scene_context.strip()}\n\n"
+                f"{_active_scene_context.strip()}\n\n"
                 f"[USER DIRECTION — apply this as action, style, and mood layered over the above scene. "
                 f"The subject looks exactly as described in the image context above. Do not change their appearance.]\n"
                 f"{user_input.strip()}"
