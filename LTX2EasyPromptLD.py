@@ -1816,10 +1816,21 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
         generated_tokens = output_ids[0][input_length:]
         result = self.tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
 
+        del generated_tokens
         del output_ids
         del input_ids
+        gc.collect()
 
         result = self._clean_output(result)
+
+        # Clear KV cache from model state — generate() leaves past_key_values
+        # in model memory if use_cache=True, growing with each run
+        if self.model is not None:
+            try:
+                if hasattr(self.model, "past_key_values"):
+                    self.model.past_key_values = None
+            except Exception:
+                pass
 
         # ── LoRA trigger hard prepend ─────────────────────────────────────────
         # Always prepend trigger words here — LLM is told NOT to include them
@@ -1885,6 +1896,26 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
         except Exception as _he:
             print(f"[LTX2] Prompt history save failed (non-fatal): {_he}")
             history_string = f"[History unavailable: {_he}]"
+
+        # Clear tokenizer internal cache every run — fast tokenizers cache encoded
+        # strings in system RAM. With keep_model_loaded=True this grows run after run.
+        if self.tokenizer is not None:
+            try:
+                # PreTrainedTokenizerFast holds a Rust-backed cache — clear it
+                if hasattr(self.tokenizer, "_tokenizer"):
+                    # The underlying Rust tokenizer has no direct clear, but
+                    # clearing the Python-side vocab cache is what we can reach
+                    pass
+                # The encode cache lives on the Python wrapper side
+                if hasattr(self.tokenizer, "cache"):
+                    self.tokenizer.cache.clear()
+                # Also clear the added_tokens encode cache if present
+                if hasattr(self.tokenizer, "_added_tokens_encoder"):
+                    self.tokenizer._added_tokens_encoder.clear()
+                    self.tokenizer._added_tokens_decoder.clear()
+            except Exception as _tc:
+                pass  # Non-fatal — just means cache persists this run
+            gc.collect()
 
         if not keep_model_loaded:
             self.unload_model()
