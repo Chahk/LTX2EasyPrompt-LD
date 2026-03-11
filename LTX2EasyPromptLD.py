@@ -13,6 +13,15 @@ import torch
 import gc
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+# ── OpenAI API client for inference server support ───────────────────────────
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+    print("[LTX2] OpenAI library not available. Install with: pip install openai")
+# ─────────────────────────────────────────────────────────────────────────────
+
 
 # ── Negative prompt builder ───────────────────────────────────────────────────
 
@@ -364,6 +373,29 @@ class LTX2PromptArchitect:
                     "multiline": False,
                     "placeholder": "Local path to Llama-3.2 3B snapshot folder",
                     "tooltip": "Optional. Paste the full path to your locally downloaded Llama 3.2 3B snapshot folder. Leave blank to use the HuggingFace cache automatically."
+                }),
+                # ── Inference server settings ────────────────────────────
+                "use_inference_server": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Use an OpenAI-compatible inference server instead of local transformer models. Requires the openai library: pip install openai"
+                }),
+                "inference_endpoint": ("STRING", {
+                    "default": "http://localhost:8000/v1",
+                    "multiline": False,
+                    "placeholder": "e.g. http://192.168.1.100:8000/v1",
+                    "tooltip": "OpenAI-compatible API endpoint URL. Include /v1 at the end for most servers (vLLM, text-generation-webui, etc.)"
+                }),
+                "inference_model": ("STRING", {
+                    "default": "mlabonne/NeuralDaredevil-8B-abliterated",
+                    "multiline": False,
+                    "placeholder": "Model name on the inference server",
+                    "tooltip": "The model identifier to use on the inference server. Must match what the server has loaded."
+                }),
+                "inference_api_key": ("STRING", {
+                    "default": "not-needed",
+                    "multiline": False,
+                    "placeholder": "API key (usually not needed for local servers)",
+                    "tooltip": "API key for the inference server. Most local servers don't require this - leave as 'not-needed'."
                 }),
             },
             "optional": {
@@ -1151,6 +1183,7 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
         bypass, user_input, creativity, seed, invent_dialogue,
         keep_model_loaded, offline_mode, frame_count, model,
         local_path_8b, local_path_3b,
+        use_inference_server, inference_endpoint, inference_model, inference_api_key,
         style_preset="None — let the LLM decide",
         portrait_mode=False,
         scene_context="",
@@ -1169,44 +1202,70 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
                 fps = 30
             return (user_input.strip(), user_input.strip(), neg_prompt, fps, "")
 
+        # ── Inference server mode ─────────────────────────────────────────────────
+        # When enabled, use OpenAI-compatible API instead of local transformers
+        if use_inference_server:
+            if not OPENAI_AVAILABLE:
+                raise ImportError(
+                    "[LTX2] OpenAI library required for inference server mode. "
+                    "Install with: pip install openai"
+                )
+
+            print(f"[LTX2] Inference server mode ON — using endpoint: {inference_endpoint}")
+            print(f"[LTX2] Model: {inference_model}")
+
+            # Unload any local model if loaded
+            if self.model is not None:
+                print("[LTX2] Unloading local model (not needed for inference server)")
+                self.unload_model()
+
+            # All the setup code from here will be needed for both paths
+            # So we'll process it, then branch at generation time
+            # For now, let's mark that we're using inference server
+            _using_inference_server = True
+        else:
+            _using_inference_server = False
+
         # ── Pre-run VRAM clear — always runs before loading anything ────────────
         # Clears whatever the previous cancelled/completed video generation left
         # behind. Runs unconditionally so the LLM never loads on top of stale VRAM.
-        if self.model is not None and self.loaded_model_key != model:
-            print(f"[LTX2] Model mismatch — unloading stale model before reload.")
-            self.unload_model()
+        # Skip if using inference server
+        if not _using_inference_server:
+            if self.model is not None and self.loaded_model_key != model:
+                print(f"[LTX2] Model mismatch — unloading stale model before reload.")
+                self.unload_model()
 
-        # Tell ComfyUI to release any models IT is holding before we load the LLM
-        # This is the key step — clears the LTX video model from VRAM first
-        try:
-            import comfy.model_management as mm
-            mm.unload_all_models()
-            mm.soft_empty_cache()
-            print("[LTX2] Pre-run: ComfyUI models unloaded.")
-        except Exception as e:
-            print(f"[LTX2] Pre-run mm call skipped: {e}")
-
-        if torch.cuda.is_available():
+            # Tell ComfyUI to release any models IT is holding before we load the LLM
+            # This is the key step — clears the LTX video model from VRAM first
             try:
-                gc.collect()
-                gc.collect()
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
-                torch.cuda.ipc_collect()
-                torch.cuda.reset_peak_memory_stats()
-                torch.cuda.empty_cache()
-                allocated_gb = torch.cuda.memory_allocated() / 1024**3
-                reserved_gb  = torch.cuda.memory_reserved()  / 1024**3
-                print(f"[LTX2] Pre-run VRAM: {allocated_gb:.2f}GB allocated / {reserved_gb:.2f}GB reserved")
+                import comfy.model_management as mm
+                mm.unload_all_models()
+                mm.soft_empty_cache()
+                print("[LTX2] Pre-run: ComfyUI models unloaded.")
             except Exception as e:
-                print(f"[LTX2] Pre-run CUDA flush warning: {e}")
+                print(f"[LTX2] Pre-run mm call skipped: {e}")
 
-        path_map = {
-            "8B - NeuralDaredevil (High Quality)": local_path_8b,
-            "3B - Llama-3.2 Abliterated (Low VRAM)": local_path_3b,
-        }
-        local_path = path_map.get(model, "")
-        self.load_model(model_key=model, offline_mode=offline_mode, local_path=local_path)
+            if torch.cuda.is_available():
+                try:
+                    gc.collect()
+                    gc.collect()
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
+                    torch.cuda.ipc_collect()
+                    torch.cuda.reset_peak_memory_stats()
+                    torch.cuda.empty_cache()
+                    allocated_gb = torch.cuda.memory_allocated() / 1024**3
+                    reserved_gb  = torch.cuda.memory_reserved()  / 1024**3
+                    print(f"[LTX2] Pre-run VRAM: {allocated_gb:.2f}GB allocated / {reserved_gb:.2f}GB reserved")
+                except Exception as e:
+                    print(f"[LTX2] Pre-run CUDA flush warning: {e}")
+
+            path_map = {
+                "8B - NeuralDaredevil (High Quality)": local_path_8b,
+                "3B - Llama-3.2 Abliterated (Low VRAM)": local_path_3b,
+            }
+            local_path = path_map.get(model, "")
+            self.load_model(model_key=model, offline_mode=offline_mode, local_path=local_path)
 
         # ── Style preset + portrait ───────────────────────────────────────────
         preset_data            = self.STYLE_PRESETS.get(style_preset, ("", False))
@@ -1772,56 +1831,100 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
             )},
         ]
 
-        raw = self.tokenizer.apply_chat_template(
-            messages,
-            return_tensors="pt",
-            add_generation_prompt=True,
-        )
-        if hasattr(raw, "input_ids"):
-            input_ids = raw.input_ids.to(self.model.device)
-        elif isinstance(raw, dict):
-            input_ids = raw["input_ids"].to(self.model.device)
-        elif isinstance(raw, list):
-            input_ids = torch.tensor([raw], dtype=torch.long).to(self.model.device)
-        else:
-            input_ids = raw.to(self.model.device)
+        # ── Prepare inputs for local model (skip if using inference server) ─────
+        if not _using_inference_server:
+            raw = self.tokenizer.apply_chat_template(
+                messages,
+                return_tensors="pt",
+                add_generation_prompt=True,
+            )
+            if hasattr(raw, "input_ids"):
+                input_ids = raw.input_ids.to(self.model.device)
+            elif isinstance(raw, dict):
+                input_ids = raw["input_ids"].to(self.model.device)
+            elif isinstance(raw, list):
+                input_ids = torch.tensor([raw], dtype=torch.long).to(self.model.device)
+            else:
+                input_ids = raw.to(self.model.device)
 
-        input_length = input_ids.shape[1]
+            input_length = input_ids.shape[1]
 
         # ── Generation — wrapped so cancelled runs always unload ──────────────
-        try:
-            with torch.no_grad():
-                output_ids = self.model.generate(
-                    input_ids,
-                    # FIX: min_new_tokens removed — was forcing continuation past natural stop points,
-                    # causing hallucinated extra paragraphs. max_new_tokens + eos_token_id handle termination.
-                    max_new_tokens=max_tokens_actual,
-                    temperature=temperature,
-                    do_sample=True,
-                    top_k=40,
-                    top_p=0.9,
-                    repetition_penalty=1.07,
-                    use_cache=True,
-                    pad_token_id=self.tokenizer.eos_token_id,
-                    eos_token_id=stop_token_ids,
+        if _using_inference_server:
+            # ── Inference server path ─────────────────────────────────────────
+            try:
+                client = OpenAI(
+                    base_url=inference_endpoint,
+                    api_key=inference_api_key,
                 )
-        except Exception as _gen_exc:
-            # Generation cancelled or errored — unload immediately so next run
-            # doesn't find a half-dead model occupying VRAM
-            print(f"[LTX2] Generation interrupted: {_gen_exc}")
-            print("[LTX2] Forcing unload due to interrupted generation.")
-            self.unload_model()
-            raise
 
-        generated_tokens = output_ids[0][input_length:]
-        result = self.tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
+                # Build messages for OpenAI API
+                api_messages = [
+                    {"role": "system", "content": messages[0]["content"]},
+                    {"role": "user", "content": messages[1]["content"]},
+                ]
 
-        del generated_tokens
-        del output_ids
-        del input_ids
-        gc.collect()
+                print(f"[LTX2] Calling inference server...")
 
-        result = self._clean_output(result)
+                # Set seed for inference server if specified
+                extra_body = {}
+                if seed != -1:
+                    extra_body["seed"] = seed
+
+                response = client.chat.completions.create(
+                    model=inference_model,
+                    messages=api_messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens_actual,
+                    top_p=0.9,
+                    frequency_penalty=0.07,  # Similar to repetition_penalty
+                    extra_body=extra_body if extra_body else None,
+                )
+
+                result = response.choices[0].message.content.strip()
+                print(f"[LTX2] Inference server response received ({len(result)} chars)")
+
+            except Exception as _gen_exc:
+                print(f"[LTX2] Inference server error: {_gen_exc}")
+                raise
+
+            result = self._clean_output(result)
+
+        else:
+            # ── Local transformer model path ──────────────────────────────────
+            try:
+                with torch.no_grad():
+                    output_ids = self.model.generate(
+                        input_ids,
+                        # FIX: min_new_tokens removed — was forcing continuation past natural stop points,
+                        # causing hallucinated extra paragraphs. max_new_tokens + eos_token_id handle termination.
+                        max_new_tokens=max_tokens_actual,
+                        temperature=temperature,
+                        do_sample=True,
+                        top_k=40,
+                        top_p=0.9,
+                        repetition_penalty=1.07,
+                        use_cache=True,
+                        pad_token_id=self.tokenizer.eos_token_id,
+                        eos_token_id=stop_token_ids,
+                    )
+            except Exception as _gen_exc:
+                # Generation cancelled or errored — unload immediately so next run
+                # doesn't find a half-dead model occupying VRAM
+                print(f"[LTX2] Generation interrupted: {_gen_exc}")
+                print("[LTX2] Forcing unload due to interrupted generation.")
+                self.unload_model()
+                raise
+
+            generated_tokens = output_ids[0][input_length:]
+            result = self.tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
+
+            del generated_tokens
+            del output_ids
+            del input_ids
+            gc.collect()
+
+            result = self._clean_output(result)
 
         # Clear KV cache from model state — generate() leaves past_key_values
         # in model memory if use_cache=True, growing with each run
