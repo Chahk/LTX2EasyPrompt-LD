@@ -374,31 +374,11 @@ class LTX2PromptArchitect:
                     "placeholder": "Local path to Llama-3.2 3B snapshot folder",
                     "tooltip": "Optional. Paste the full path to your locally downloaded Llama 3.2 3B snapshot folder. Leave blank to use the HuggingFace cache automatically."
                 }),
-                # ── Inference server settings ────────────────────────────
-                "use_inference_server": ("BOOLEAN", {
-                    "default": False,
-                    "tooltip": "Use an OpenAI-compatible inference server instead of local transformer models. Requires the openai library: pip install openai"
-                }),
-                "inference_endpoint": ("STRING", {
-                    "default": "http://localhost:8000/v1",
-                    "multiline": False,
-                    "placeholder": "e.g. http://192.168.1.100:8000/v1",
-                    "tooltip": "OpenAI-compatible API endpoint URL. Include /v1 at the end for most servers (vLLM, text-generation-webui, etc.)"
-                }),
-                "inference_model": ("STRING", {
-                    "default": "mlabonne/NeuralDaredevil-8B-abliterated",
-                    "multiline": False,
-                    "placeholder": "Model name on the inference server",
-                    "tooltip": "The model identifier to use on the inference server. Must match what the server has loaded."
-                }),
-                "inference_api_key": ("STRING", {
-                    "default": "not-needed",
-                    "multiline": False,
-                    "placeholder": "API key (usually not needed for local servers)",
-                    "tooltip": "API key for the inference server. Most local servers don't require this - leave as 'not-needed'."
-                }),
             },
             "optional": {
+                "server_config": ("SERVER_CONFIG", {
+                    "tooltip": "Optional: Wire LTX2 Inference Server Config node here to use remote inference instead of local models. If not connected, uses local transformer models."
+                }),
                 "use_scene_context": ("BOOLEAN", {
                     "default": True,
                     "tooltip": "Enable or disable scene_context without disconnecting the wire. Turn OFF to use your text input only and ignore the wired vision description."
@@ -1183,9 +1163,9 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
         bypass, user_input, creativity, seed, invent_dialogue,
         keep_model_loaded, offline_mode, frame_count, model,
         local_path_8b, local_path_3b,
-        use_inference_server, inference_endpoint, inference_model, inference_api_key,
         style_preset="None — let the LLM decide",
         portrait_mode=False,
+        server_config=None,
         scene_context="",
         lora_triggers="",
         use_scene_context=True,
@@ -1203,13 +1183,18 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
             return (user_input.strip(), user_input.strip(), neg_prompt, fps, "")
 
         # ── Inference server mode ─────────────────────────────────────────────────
-        # When enabled, use OpenAI-compatible API instead of local transformers
-        if use_inference_server:
+        # When server_config is provided, use OpenAI-compatible API instead of local transformers
+        if server_config is not None:
             if not OPENAI_AVAILABLE:
                 raise ImportError(
                     "[LTX2] OpenAI library required for inference server mode. "
                     "Install with: pip install openai"
                 )
+
+            # Extract settings from server_config dict
+            inference_endpoint = server_config.get("url", "http://localhost:8000/v1")
+            inference_model = server_config.get("model_name", "mlabonne/NeuralDaredevil-8B-abliterated")
+            inference_api_key = server_config.get("api_key", "not-needed")
 
             print(f"[LTX2] Inference server mode ON — using endpoint: {inference_endpoint}")
             print(f"[LTX2] Model: {inference_model}")
@@ -1219,9 +1204,6 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
                 print("[LTX2] Unloading local model (not needed for inference server)")
                 self.unload_model()
 
-            # All the setup code from here will be needed for both paths
-            # So we'll process it, then branch at generation time
-            # For now, let's mark that we're using inference server
             _using_inference_server = True
         else:
             _using_inference_server = False
@@ -1865,11 +1847,19 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
                 ]
 
                 print(f"[LTX2] Calling inference server...")
+                if seed != -1:
+                    print(f"[LTX2] Using seed: {seed}")
 
                 # Set seed for inference server if specified
+                # Different servers handle seed differently:
+                # - vLLM: extra_body["seed"]
+                # - text-generation-webui: seed parameter
+                # - Some servers: in extra_body
                 extra_body = {}
+                seed_param = None
                 if seed != -1:
                     extra_body["seed"] = seed
+                    seed_param = seed
 
                 response = client.chat.completions.create(
                     model=inference_model,
@@ -1878,6 +1868,7 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
                     max_tokens=max_tokens_actual,
                     top_p=0.9,
                     frequency_penalty=0.07,  # Similar to repetition_penalty
+                    seed=seed_param,  # Try as direct parameter
                     extra_body=extra_body if extra_body else None,
                 )
 

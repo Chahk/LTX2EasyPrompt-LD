@@ -75,28 +75,10 @@ class LTX2VisionDescribe:
                     "placeholder": "Optional: local snapshot path (overrides model dropdown)",
                     "tooltip": "Optional. Paste the full path to a locally downloaded model snapshot folder. This overrides the model dropdown above. Leave blank to use HuggingFace cache automatically."
                 }),
-                # ── Inference server settings ────────────────────────────
-                "use_inference_server": ("BOOLEAN", {
-                    "default": False,
-                    "tooltip": "Use an OpenAI-compatible vision inference server instead of local transformer models. Requires the openai library: pip install openai"
-                }),
-                "inference_endpoint": ("STRING", {
-                    "default": "http://localhost:8000/v1",
-                    "multiline": False,
-                    "placeholder": "e.g. http://192.168.1.100:8000/v1",
-                    "tooltip": "OpenAI-compatible API endpoint URL. Include /v1 at the end for most servers."
-                }),
-                "inference_model": ("STRING", {
-                    "default": "huihui-ai/Qwen2.5-VL-3B-Instruct-abliterated",
-                    "multiline": False,
-                    "placeholder": "Model name on the inference server",
-                    "tooltip": "The vision model identifier to use on the inference server. Must match what the server has loaded."
-                }),
-                "inference_api_key": ("STRING", {
-                    "default": "not-needed",
-                    "multiline": False,
-                    "placeholder": "API key (usually not needed for local servers)",
-                    "tooltip": "API key for the inference server. Most local servers don't require this - leave as 'not-needed'."
+            },
+            "optional": {
+                "server_config": ("SERVER_CONFIG", {
+                    "tooltip": "Optional: Wire LTX2 Inference Server Config node here to use remote vision inference instead of local models. If not connected, uses local transformer models."
                 }),
             },
         }
@@ -106,17 +88,21 @@ class LTX2VisionDescribe:
     FUNCTION      = "describe"
     CATEGORY      = "LTX2"
 
-    def describe(self, image, model_name, offline_mode, local_path,
-                 use_inference_server, inference_endpoint, inference_model, inference_api_key):
+    def describe(self, image, model_name, offline_mode, local_path, server_config=None):
         global _INSTANCE
 
         # ── Inference server mode ─────────────────────────────────────────────────
-        if use_inference_server:
+        if server_config is not None:
             if not OPENAI_AVAILABLE:
                 raise ImportError(
                     "[VisionDescribe] OpenAI library required for inference server mode. "
                     "Install with: pip install openai"
                 )
+
+            # Extract settings from server_config dict
+            inference_endpoint = server_config.get("url", "http://localhost:8000/v1")
+            inference_model = server_config.get("model_name", "huihui-ai/Qwen2.5-VL-3B-Instruct-abliterated")
+            inference_api_key = server_config.get("api_key", "not-needed")
 
             print(f"[VisionDescribe] Inference server mode ON — using endpoint: {inference_endpoint}")
             print(f"[VisionDescribe] Model: {inference_model}")
