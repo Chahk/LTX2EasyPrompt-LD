@@ -40,6 +40,7 @@ _NEG_PORTRAIT_ORI  = "landscape orientation, letterbox, pillarbox, horizontal cr
 _NEG_VHS           = "clean digital, sharp edges, 4K, high resolution, pristine quality"
 _NEG_HORROR        = "bright happy lighting, warm tones, cheerful atmosphere, soft light"
 _NEG_FASHION       = "casual handheld, amateur footage, flat lighting, unposed"
+_NEG_SELFIE        = "tripod, gimbal stabilised, smooth camera movement, rack focus, dolly, crane, cinematic bokeh, dramatic depth of field, professional lighting, film grain, colour grade, cinematic lens, landscape orientation"
 
 _NEG_ANIME         = "photorealistic, live action, real person, CGI, 3D render, western cartoon, flat shading"
 _NEG_2DCARTOON     = "photorealistic, 3D render, CGI, anime, live action, flat digital art, no line work"
@@ -92,6 +93,8 @@ def _build_negative_prompt(result: str, user_input: str, is_portrait: bool = Fal
         extras.append(_NEG_HORROR)
     if "fashion editorial" in style_preset.lower():
         extras.append(_NEG_FASHION)
+    if "selfie" in style_preset.lower() or "self-shot" in style_preset.lower():
+        extras.append(_NEG_SELFIE)
 
 
     # Animation styles
@@ -541,6 +544,26 @@ class LTX2PromptArchitect:
             "STYLE: Native portrait video, 9:16 aspect ratio. Optimised for mobile — TikTok, Reels, Shorts. "
             "Frame is vertical throughout. Tight head-to-torso framing. "
             "Action moves vertically in frame. Camera stays close. No wide horizontal composition.", True),
+        "Selfie — self-shot, arm's length": (
+            "STYLE: Self-shot selfie video. The subject is holding the camera themselves — "
+            "outstretched arm, camera facing back at them, roughly 50–70cm from their face. "
+            "9:16 vertical frame throughout. "
+            "FRAMING: tight head-and-shoulders. The subject's face and upper chest fill most of the frame. "
+            "The background is whatever is physically behind them — visible and readable, not blurred out. "
+            "Moderate depth of field — subject sharp, background softly out of focus but present. "
+            "CAMERA BEHAVIOUR — MANDATORY: the camera is an extension of the subject's arm. "
+            "It moves when they move — bobs as they walk, tilts when they turn their head, "
+            "dips when they look down, swings slightly when they gesture. "
+            "The subject controls the framing — they pull back to show more context, "
+            "push forward when they want to fill the frame with their face. "
+            "This is self-directed. The subject is fully aware of the camera and performing to it. "
+            "FORBIDDEN: tripod stillness, gimbal smoothness, rack focus, dolly, crane, orbit. "
+            "The camera never separates from the subject's hand or floats independently. "
+            "COLOUR: clean and bright, natural available light, no cinematic grade. "
+            "SOUND: the subject's voice is close and direct — microphone is right at the camera. "
+            "Voice is dominant. Ambient environment sits underneath at lower level. "
+            "SCOPE NOTE: This style sets the shooting aesthetic only — "
+            "it does NOT add content, nudity, or actions the user did not describe.", True),
         # Animation
         "Anime — Japanese animation": (
             "STYLE: Japanese anime. Hand-drawn animation aesthetic — clean ink outlines, flat colour fills with "
@@ -652,6 +675,7 @@ class LTX2PromptArchitect:
         # Speciality
         "POV — first person, immersive":            30,
         "Portrait vertical — 9:16 mobile":          30,
+        "Selfie — self-shot, arm's length":        30,  # self-shot vertical, 30fps
 
         # Animation
         "Anime — Japanese animation":               24,
@@ -704,6 +728,7 @@ class LTX2PromptArchitect:
         # Speciality
         "POV — first person, immersive":            "First-person POV footage.",
         "Portrait vertical — 9:16 mobile":          "Vertical 9:16 mobile video.",
+        "Selfie — self-shot, arm's length":        "Selfie video, self-shot at arm's length, vertical 9:16.",
         # Animation
         "Anime — Japanese animation":               "Japanese anime animation, hand-drawn cel style.",
         "2D cartoon — hand-drawn":                  "2D hand-drawn cartoon animation.",
@@ -845,12 +870,28 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
             print(f"[LTX2] Using HF cache for: {hf_model_id}")
         else:
             print(f"[LTX2] Auto-downloading if needed: {hf_model_id}")
+            # Ensure huggingface_hub is available — install it if missing.
+            # ComfyUI environments don't always include it even though transformers does.
+            try:
+                import huggingface_hub as _hfhub
+            except ImportError:
+                print("[LTX2] huggingface_hub not found — installing now...")
+                import subprocess, sys
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "huggingface_hub", "-q"])
+                import huggingface_hub as _hfhub
+                print("[LTX2] huggingface_hub installed successfully.")
+
             try:
                 from huggingface_hub import snapshot_download
-                model_source = snapshot_download(hf_model_id)
+                print(f"[LTX2] Resolving model from HuggingFace: {hf_model_id}")
+                model_source = snapshot_download(
+                    hf_model_id,
+                    ignore_patterns=["*.gguf"],
+                )
                 print(f"[LTX2] Model ready at: {model_source}")
             except Exception as e:
-                print(f"[LTX2] snapshot_download failed, falling back to model ID: {e}")
+                print(f"[LTX2] snapshot_download failed: {e}")
+                print(f"[LTX2] Falling back to from_pretrained direct download for: {hf_model_id}")
                 model_source = hf_model_id
 
         print(f"[LTX2] Loading: {model_key}")
