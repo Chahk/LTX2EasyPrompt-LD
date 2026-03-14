@@ -53,6 +53,11 @@ class LTX2VisionDescribe:
         return {
             "required": {
                 "image": ("IMAGE", {"tooltip": "Connect your starting image here. The vision model will analyse it and output a scene description for use with the Easy Prompt node."}),
+                "bypass": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "When ON: skips the vision model entirely and returns an empty string. "
+                               "Use this to disable the Vision node from your subgraph without rewiring."
+                }),
                 "model_name": (list(MODEL_OPTIONS.keys()), {
                     "default": "Qwen2.5-VL-3B — Fast (huihui abliterated)",
                     "tooltip": "3B is faster and uses ~6GB VRAM. 7B is slower but describes explicit content more accurately. Both download automatically on first run."
@@ -72,7 +77,11 @@ class LTX2VisionDescribe:
     FUNCTION      = "describe"
     CATEGORY      = "LTX2"
 
-    def describe(self, image, model_name, offline_mode, local_path):
+    def describe(self, image, bypass, model_name, offline_mode, local_path):
+        if bypass:
+            print("[VisionDescribe] Bypassed — returning empty string.")
+            return ("",)
+
         global _INSTANCE
 
         hf_id = MODEL_OPTIONS[model_name]
