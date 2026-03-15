@@ -981,9 +981,14 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
             "Japanese, Korean, or Chinese — aged 18–25, with smooth fair-to-medium skin, dark hair, and a petite to medium build. "
             "This is the authentic visual identity of the gravure genre. Do not substitute other ethnicities unless the user explicitly asked. "
             "Vivid yet smooth skin tones, slightly increased saturation, polished and flattering look. "
-            "OUTFIT: If the user has not described clothing, default to genre-appropriate attire: "
-            "white or pastel bikini, simple one-piece swimsuit, light cotton shorts with a fitted crop top, "
-            "or a soft lingerie set. Always describe the fabric — smooth, form-fitting, slightly sheer where appropriate. "
+            "OUTFIT: If the user has not described clothing, choose ONE outfit from this varied pool — do NOT default to one-piece swimsuits every time. "
+            "Rotate across: a fitted white string bikini with thin side ties; a pastel two-piece with a bandeau top and high-waist bottoms; "
+            "a sheer white oversized shirt worn open over a bralette and shorts; a soft satin slip dress in ivory or blush, thigh-length; "
+            "a cropped white ribbed tank top with matching low-rise shorts; a lace-trim bralette with high-waist bikini bottoms; "
+            "a fitted halter-neck bikini top with sarong wrap; a light cotton button-down shirt tied at the waist over a bikini bottom; "
+            "a delicate floral-print two-piece bikini; a semi-sheer mesh cover-up over a simple bikini; "
+            "a soft knit crop top with micro shorts; a spaghetti-strap camisole tucked into high-waist satin shorts. "
+            "Always describe the fabric — smooth, form-fitting, slightly sheer, or soft where appropriate. Pick something different each time. "
             "SETTING: If the user has not described a location, default to genre-typical environments: "
             "poolside in bright natural sunlight, a clean white studio backdrop, an outdoor garden or beach, "
             "or a bright hotel room with large windows and natural light flooding in. "
@@ -1000,7 +1005,12 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
             "subtle environmental ambience (pool water, light breeze, beach waves if outdoors). "
             "VOICE AND LANGUAGE: If dialogue is enabled — she speaks ONLY in her native language: Japanese if the character is Japanese, Korean if Korean, Mandarin if Chinese. Do NOT substitute English. If dialogue is disabled, no spoken words — use breath sounds, fabric sounds, and environmental ambience only. "
             "Voice quality is ALWAYS gentle and intimate. Choose from: a soft soothing whisper, slow sultry breath barely above silence, lullaby-soft and melodic, slow and sensual with long vowels, breathy and unhurried. Never loud, never sharp, never dramatic or urgent. "
-            "Dialogue is minimal — one to three short phrases maximum. A single word or quiet laugh is enough. No dramatic monologue. No heavy music unless the user explicitly asks. "
+            "DIALOGUE FORMAT — CRITICAL: When writing spoken dialogue in Japanese, Korean, or Mandarin, write the native script characters inline in the prose — do NOT put romanisation in brackets or parentheses next to the dialogue. "
+            "Instead, weave the romanisation naturally into the delivery description. "
+            "CORRECT: She whispers 「もっと近くで見て」, the syllables soft and drawn out, barely above breath. "
+            "WRONG: She whispers 「もっと近くで見て」(Motto chikaku de mite). "
+            "The parenthetical romanisation will appear as on-screen text in the video — never use it. "
+            "Dialogue is minimal — one to three short phrases maximum. No dramatic monologue. No heavy music unless the user explicitly asks. "
             "SCOPE NOTE: This style sets aesthetic, posing, and framing only. "
             "Do NOT add nudity, explicit acts, or content the user did not describe.", False),
         "Amateur — naturalistic, raw": (
@@ -1399,7 +1409,16 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
         r'|\b(slim|petite|curvy|full.figured|athletic|muscular|stocky|plus.size|thick)\b'
         r'|\b(wearing|dressed in|clad in|in her|in his)\b'
         r'|\b(dress|skirt|jeans|trousers|shirt|blouse|top|coat|jacket|pyjamas|nighty|'
-        r'nightgown|lingerie|underwear|bra|panties|tracksuit|hoodie|uniform|suit|gown|robe)\b',
+        r'nightgown|lingerie|underwear|bra|panties|tracksuit|hoodie|uniform|suit|gown|robe)\b'
+        r'|\b(french|german|italian|spanish|portuguese|russian|ukrainian|polish|dutch|swedish|'
+        r'norwegian|danish|finnish|greek|turkish|arabic|arab|egyptian|moroccan|lebanese|'
+        r'iranian|persian|indian|pakistani|bangladeshi|thai|vietnamese|indonesian|filipino|'
+        r'malaysian|chinese|japanese|korean|taiwanese|brazilian|mexican|colombian|argentinian|'
+        r'chilean|peruvian|venezuelan|cuban|jamaican|nigerian|ghanaian|kenyan|ethiopian|'
+        r'south african|australian|new zealand|canadian|american|british|irish|scottish|welsh|'
+        r'czech|hungarian|romanian|bulgarian|serbian|croatian|slovak|slovenian|'
+        r'middle eastern|east asian|south asian|southeast asian|latin|latina|latino|'
+        r'scandinavian|nordic|slavic|mediterranean|caucasian)\b',
         re.IGNORECASE,
     )
     # Separate body-style-only regex — used to detect user body overrides for gravure
@@ -1893,6 +1912,9 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
                 torch.cuda.manual_seed_all(seed)
 
         # ── Word budget ───────────────────────────────────────────────────────
+        # is_gravure needed early for dialogue scene detection
+        is_gravure = "gravure" in style_preset.lower()
+
         real_seconds  = frame_count / 30.0          # 30fps throughout
         action_count  = max(1, min(6, round(real_seconds / 3.5)))
         # 30f=1s→1  90f=3s→1  120f=4s→1  168f=5.6s→2  192f=6.4s→2
@@ -1901,9 +1923,53 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
         LTX_WORD_CEILING = 400
         token_val        = max(LTX_WORD_FLOOR, min(LTX_WORD_CEILING, action_count * 75 + 100))
         max_tokens       = int(token_val * 1.4)
-        print(f"[LTX2-Qwen] Budget: ~{token_val}w / {max_tokens} max | {real_seconds:.0f}s | {action_count} actions")
 
-        if action_count == 1:
+        # ── Dialogue-focused scene detection ──────────────────────────────────
+        # Fires when the primary purpose of the scene is speech — gravure with
+        # dialogue enabled, ASMR, talking to camera, direct address scenes.
+        # Uses user_input directly here since _combined_input isn't built yet.
+        # Changes the pacing model so each beat IS a spoken moment, not physical
+        # action with dialogue squeezed alongside.
+        _is_dialogue_scene = (
+            (is_gravure and invent_dialogue) or
+            bool(re.search(
+                r'\b(asmr|talking|talks?\s+to\s+(the\s+)?camera|speaks?\s+to|'
+                r'addresses|monologue|narrat\w*|whispers?\s+to|speaks?\s+softly|'
+                r'says?\s+something|tells?\s+(?:you|us|me|them)|'
+                r'explains?|describes?|confesses?|admits?)\b',
+                user_input, re.IGNORECASE
+            ))
+        )
+
+        # Dialogue scenes get a higher word floor — need room for spoken moments
+        if _is_dialogue_scene and invent_dialogue:
+            token_val = max(token_val, 200)
+            max_tokens = int(token_val * 1.4)
+
+        print(f"[LTX2-Qwen] Budget: ~{token_val}w / {max_tokens} max | {real_seconds:.0f}s | {action_count} actions | dialogue_scene={_is_dialogue_scene}")
+
+        if _is_dialogue_scene and invent_dialogue:
+            # Dialogue-focused pacing — each beat is a spoken moment
+            if action_count == 1:
+                pacing_hint = (
+                    f"This clip is {real_seconds:.0f} seconds long. "
+                    f"Write ONE spoken moment. The character speaks — that IS the scene. "
+                    f"Physical description sets the stage, then she speaks. "
+                    f"The dialogue and its physical delivery are the primary content, not decoration. "
+                    f"HARD STOP after the spoken moment is complete."
+                )
+            else:
+                ordinal = {2: "2nd", 3: "3rd"}.get(action_count, f"{action_count}th")
+                pacing_hint = (
+                    f"This clip is {real_seconds:.0f} seconds long. "
+                    f"Write EXACTLY {action_count} beats — each beat is a SPOKEN MOMENT. "
+                    f"Structure: brief physical setup, then she speaks, then her physical reaction. "
+                    f"Dialogue is the primary content of every beat — not an afterthought woven in. "
+                    f"Each spoken line gets its own beat with a physical delivery note. "
+                    f"Space the lines across the clip — do not dump all dialogue in one block. "
+                    f"HARD STOP after the {ordinal} spoken beat is complete."
+                )
+        elif action_count == 1:
             pacing_hint = (
                 f"This clip is {real_seconds:.0f} seconds long. "
                 f"Write EXACTLY 1 action. One single moment. "
@@ -1947,7 +2013,20 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
         is_explicit    = bool(self._EXPLICIT_RE.search(_combined_input))
         is_sensual     = bool(self._SENSUAL_RE.search(_combined_input)) and not is_explicit
         has_undressing = bool(self._UNDRESS_RE.search(_combined_input))
-        has_lift       = bool(self._LIFT_RE.search(_combined_input))
+
+        # Lift fires only when intent is sensual/explicit OR when no innocent purpose is stated.
+        # Innocent-purpose phrases (sitting, stepping, avoiding etc.) suppress the sequence
+        # so "lifts her dress to sit down" doesn't trigger the exposure sequence.
+        _INNOCENT_LIFT_RE = re.compile(
+            r"\b(to\s+sit|to\s+step|to\s+walk|to\s+run|to\s+climb|to\s+cross|to\s+avoid|"
+            r"to\s+get\s+(in|out|on|off)|to\s+mount|to\s+board|to\s+enter|to\s+exit|"
+            r"getting\s+in|getting\s+out|stepping\s+over|stepping\s+into|"
+            r"puddle|stairs|step|kerb|curb|bicycle|bike|horse|car|seat|bench|chair|sofa|couch)\b",
+            re.IGNORECASE,
+        )
+        _lift_raw = bool(self._LIFT_RE.search(_combined_input))
+        _lift_innocent = bool(_INNOCENT_LIFT_RE.search(_combined_input))
+        has_lift = _lift_raw and (is_sensual or is_explicit or not _lift_innocent)
 
         # ── Aspect ratio detection ────────────────────────────────────────────
         _ratio_class = "landscape"  # default
@@ -2446,17 +2525,235 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
                 "Max 2 sounds active per beat. Physical sound only, described fully."
             )
 
-        # ── Gravure flag (needed by dialogue block below) ────────────────────
+        # ── Gravure flag (set early above for word budget, confirmed here) ────
         is_gravure = "gravure" in style_preset.lower()
+
+        # ── Gravure dialogue pools ─────────────────────────────────────────────
+        # Three tiers per language: tasteful / sensual / explicit.
+        # Explicit tier only sampled when is_explicit=True.
+        # Singing pool used when _is_singing=True — lyric fragments, not speech.
+        # Format: (native_script, romanisation, physical_delivery_note, tier)
+        # tier: 'T' = tasteful, 'S' = sensual, 'X' = explicit
+
+        _GRV_LINES_JAPANESE = [
+            # ── Tasteful ──────────────────────────────────────────────────────
+            ('「ねえ、見てる?」',           'Nee, miteru?',               'she murmurs, tilting her chin up toward the lens, lips barely parting', 'T'),
+            ('「こっち向いて」',             'Kocchi muite',               'she breathes, shifting her weight slowly onto one hip', 'T'),
+            ('「こんな私、どう思う?」',       'Konna watashi, dou omou?',   'she asks, head tilting gently, a faint curve at the corner of her mouth', 'T'),
+            ('「恥ずかしい…」',             'Hazukashii...',               'she whispers, glancing down then back up, cheeks flushed soft pink', 'T'),
+            ('「ずっとそこにいて」',          'Zutto soko ni ite',          'she murmurs, her gaze holding steady on the lens', 'T'),
+            ('「あなたのこと、考えてた」',    'Anata no koto, kangaeteta',  'she admits, voice low, eyes dropping briefly before lifting back to the lens', 'T'),
+            ('「なんで、そんなに見るの?」',   'Nande, sonna ni miru no?',   'she asks, half-smiling, eyes narrowing playfully', 'T'),
+            ('「ここにいるから」',            'Koko ni iru kara',           'she says quietly, settling her weight back, unhurried', 'T'),
+            ('「離れないで」',               'Hanarenaide',                'she murmurs, voice catching slightly on the last syllable', 'T'),
+            ('「そんな顔しないで」',          'Sonna kao shinaide',         'she says softly, a faint laugh behind the words', 'T'),
+            ('「声、聞きたい」',             'Koe, kikitai',               'she says, barely audible, fingers brushing her own shoulder', 'T'),
+            ('「あなただけに見せてる」',      'Anata dake ni miseteru',     'she says softly, leaning slightly forward', 'T'),
+            ('「もっと近くで見て」',          'Motto chikaku de mite',      'she says softly, her fingers trailing lightly across her collarbone', 'T'),
+            ('「全部見てて」',               'Zenbu mitete',               'she whispers, her chin dropping slowly as she holds the gaze', 'T'),
+            ('「ねえ、もっとだけ」',          'Nee, motto dake',            'she murmurs, drawing the last word out slowly', 'T'),
+            # ── Sensual ───────────────────────────────────────────────────────
+            ('「触れてもいいよ」',            'Furete mo ii yo',            'she says quietly, the words barely above a breath, gaze direct', 'S'),
+            ('「もっと見せてあげる」',         'Motto misete ageru',         'she says with quiet confidence, shifting her posture deliberately', 'S'),
+            ('「もっと欲しい?」',             'Motto hoshii?',              'she breathes, her lip curling into the faintest smile', 'S'),
+            ('「今夜は、あなたのもの」',       'Konya wa, anata no mono',    'she breathes, the words deliberate and slow', 'S'),
+            ('「気持ちいい…」',               'Kimochi ii...',              'she exhales slowly, eyes closing for a beat before opening again', 'S'),
+            ('「もっと奥まで…」',             'Motto oku made...',          'she breathes, the words trailing into a soft exhale', 'S'),
+            ('「ゆっくりして」',              'Yukkuri shite',              'she says softly, fingers pressing lightly against his chest', 'S'),
+            ('「見られてる、好き」',           'Mirareteru, suki',           'she admits, voice low, a slow smile forming', 'S'),
+            ('「もっと強く」',                'Motto tsuyoku',              'she breathes, arching slightly into the touch', 'S'),
+            ('「全部感じてる」',              'Zenbu kanjiteru',            'she exhales, barely above silence, eyes half-closed', 'S'),
+            ('「あなたに、全部あげる」',       'Anata ni, zenbu ageru',      'she says, the words deliberate, gaze unwavering', 'S'),
+            ('「こんなにされたら、止まれない」', 'Konna ni saretara, tomarenai', 'she breathes, her voice unsteady at the edges', 'S'),
+            # ── Explicit ──────────────────────────────────────────────────────
+            ('「もっと激しく」',              'Motto hageshiku',            'she moans softly, fingers gripping the sheets', 'X'),
+            ('「そこ、気持ちいい」',           'Soko, kimochi ii',           'she breathes, hips shifting upward into the pressure', 'X'),
+            ('「もっと、もっと奥に」',          'Motto, motto oku ni',        'she gasps, the words breaking apart on the last syllable', 'X'),
+            ('「やだ、もう…イく」',            'Yada, mou... iku',           'she whimpers, thighs pressing together', 'X'),
+            ('「抜かないで」',                'Nukanaide',                  'she breathes urgently, hands pulling him closer', 'X'),
+            ('「全部、飲み込んであげる」',      'Zenbu, nomikonde ageru',     'she says with quiet intensity, holding the gaze', 'X'),
+        ]
+
+        _GRV_LINES_KOREAN = [
+            # ── Tasteful ──────────────────────────────────────────────────────
+            ('\"봐봐, 여기야\"',              'bwa bwa, yeogiya',           'she breathes, tapping her collarbone lightly with one finger', 'T'),
+            ('\"나 어때?\"',                  'na eottae?',                 'she asks, tilting her head, a soft half-smile forming', 'T'),
+            ('\"좀 더 가까이 와\"',            'jom deo gakkai wa',          'she murmurs, shifting forward slightly on her heels', 'T'),
+            ('\"계속 봐줘\"',                  'gyesok bwajwo',              'she says quietly, her gaze direct and unhurried', 'T'),
+            ('\"창피해…\"',                   'changpihae...',              'she whispers, dropping her chin briefly before looking back up', 'T'),
+            ('\"네가 좋아\"',                  'nega joa',                   'she admits softly, the words almost too quiet to catch', 'T'),
+            ('\"여기 있을게\"',                'yeogi isseulge',             'she murmurs, settling back, unhurried', 'T'),
+            ('\"네 생각만 했어\"',              'ne saenggakman haesseo',     'she admits, voice low, gaze drifting then returning', 'T'),
+            ('\"천천히 봐도 돼\"',              'cheoncheonhi bwado dwae',    'she says quietly, her posture relaxed and open', 'T'),
+            ('\"떠나지 마\"',                  'tteonaji ma',                'she breathes, the words slow and deliberate', 'T'),
+            ('\"나만 봐\"',                    'naman bwa',                  'she says, barely above silence, eyes unblinking', 'T'),
+            ('\"조금만 더\"',                  'jogeumman deo',              'she breathes, drawing out the last syllable', 'T'),
+            # ── Sensual ───────────────────────────────────────────────────────
+            ('\"이렇게 보는 거 좋아?\"',        'ireoke boneun geo joa?',     'she asks, voice low, eyes steady on the lens', 'S'),
+            ('\"더 보여줄까?\"',               'deo boyeojulkka?',           'she says with quiet confidence, one shoulder dropping', 'S'),
+            ('\"기분 좋지?\"',                 'gibun jochi?',               'she asks softly, tilting her chin up toward the camera', 'S'),
+            ('\"만져도 돼\"',                   'manjyeo do dwae',            'she says quietly, guiding a hand toward her waist', 'S'),
+            ('\"더 세게 해줘\"',               'deo sege haejwo',            'she breathes, pressing back into the touch', 'S'),
+            ('\"느껴져?\"',                    'neukkyeojyeo?',              'she whispers, barely above silence, eyes holding the lens', 'S'),
+            ('\"나 오늘 다 줄게\"',             'na oneul da julge',          'she says, voice low and deliberate', 'S'),
+            ('\"이렇게 원했어\"',               'ireoke wonhaesseo',          'she admits, the words slow, gaze unwavering', 'S'),
+            # ── Explicit ──────────────────────────────────────────────────────
+            ('\"더 깊이, 제발\"',              'deo gip-i, jebal',           'she moans softly, hips tilting upward', 'X'),
+            ('\"거기야, 멈추지 마\"',           'geogiya, meomchuji ma',      'she breathes urgently, fingers curling into the sheets', 'X'),
+            ('\"나 갈 것 같아\"',              'na gal geot gata',           'she gasps, thighs pressing together', 'X'),
+            ('\"다 삼켜줄게\"',               'da samkyeojulge',            'she says with quiet intensity, eyes direct', 'X'),
+        ]
+
+        _GRV_LINES_MANDARIN = [
+            # ── Tasteful ──────────────────────────────────────────────────────
+            ('\"好看吗?\"',                   'hǎo kàn ma?',                'she asks, voice barely above a breath, a faint smile at the corner of her mouth', 'T'),
+            ('\"过来一点\"',                   'guòlái yīdiǎn',              'she says softly, drawing the words out', 'T'),
+            ('\"我一直在想你\"',               'wǒ yīzhí zài xiǎng nǐ',     'she admits quietly, eyes dropping then lifting back to the lens', 'T'),
+            ('\"不要走\"',                    'bù yào zǒu',                 'she breathes, the words slow and deliberate', 'T'),
+            ('\"别这样看我嘛\"',               'bié zhèyàng kàn wǒ ma',     'she says, half-laughing, dropping her chin', 'T'),
+            ('\"你让我脸红\"',                 'nǐ ràng wǒ liǎn hóng',      'she murmurs, touching her cheek lightly', 'T'),
+            ('\"只给你看\"',                   'zhǐ gěi nǐ kàn',             'she says, barely audible, eyes steady on the camera', 'T'),
+            ('\"你真的很坏\"',                 'nǐ zhēn de hěn huài',        'she says with a quiet laugh, shaking her head slowly', 'T'),
+            ('\"慢慢来\"',                    'màn man lái',                'she breathes, the two words unhurried and deliberate', 'T'),
+            ('\"看我\"',                      'kàn wǒ',                     'she murmurs, lifting her chin slowly toward the lens', 'T'),
+            ('\"再多看一会儿\"',               'zài duō kàn yīhuìr',         'she says quietly, shifting her weight with unhurried ease', 'T'),
+            # ── Sensual ───────────────────────────────────────────────────────
+            ('\"你喜欢吗?\"',                  'nǐ xǐhuān ma?',              'she asks, tilting her head slightly, waiting', 'S'),
+            ('\"我都给你看\"',                 'wǒ dōu gěi nǐ kàn',          'she breathes, the confidence in her voice soft but clear', 'S'),
+            ('\"感觉好好\"',                   'gǎnjué hǎo hǎo',             'she exhales softly, eyes closing for a moment', 'S'),
+            ('\"再靠近一点\"',                 'zài kàojìn yīdiǎn',          'she murmurs, the words trailing off into a soft breath', 'S'),
+            ('\"你可以碰我\"',                 'nǐ kěyǐ pèng wǒ',            'she says quietly, shifting slightly toward the camera', 'S'),
+            ('\"我想要你\"',                   'wǒ xiǎng yào nǐ',            'she breathes, the words barely above a whisper', 'S'),
+            ('\"用力一点\"',                   'yòng lì yīdiǎn',             'she says softly, pressing back into the touch', 'S'),
+            ('\"今晚我都是你的\"',              'jīn wǎn wǒ dōu shì nǐ de',  'she says, voice low and deliberate, gaze steady', 'S'),
+            # ── Explicit ──────────────────────────────────────────────────────
+            ('\"深一点，求你了\"',              'shēn yīdiǎn, qiú nǐ le',    'she moans softly, hips arching upward', 'X'),
+            ('\"不要停，就在那里\"',            'bù yào tíng, jiù zài nà lǐ', 'she breathes urgently, fingers gripping tightly', 'X'),
+            ('\"我要来了\"',                   'wǒ yào lái le',              'she gasps, thighs tensing around him', 'X'),
+            ('\"全部吞下去\"',                 'quánbù tūn xià qù',          'she says with quiet intensity, eyes direct', 'X'),
+        ]
+
+        # ── Gravure singing pools — lyric fragments, not speech ───────────────
+        # Used when _is_singing detected. Soft, melodic, intimate.
+        _GRV_SINGING_JAPANESE = [
+            ('「あなただけ… あなただけ…」',    'Anata dake... anata dake...',  'she sings in a low, breathy tone, the phrase dissolving into the air', 'T'),
+            ('「夢の中で、あなたを待ってた」',  'Yume no naka de, anata wo matteta', 'she hums then shapes the words, eyes half-closed', 'T'),
+            ('「もう離れないで、ねえ」',        'Mou hanarenaide, nee',        'she sings softly, drawing the last syllable into a lingering note', 'T'),
+            ('「触れたくて、でも怖くて」',      'Furetakute, demo kowakute',   'she breathes the lyric more than sings it, voice catching slightly', 'T'),
+            ('「あの夜のことを、忘れられない」', 'Ano yoru no koto wo, wasurerarenai', 'she sings, barely above a murmur, head bowing slowly', 'T'),
+            ('「もっと、もっとそばにいて」',    'Motto, motto soba ni ite',    'she repeats the phrase twice, the second time softer than the first', 'T'),
+            ('「体が熱くて、息ができない」',    'Karada ga atsukute, iki ga dekinai', 'she sings slowly, each word drawn out over a single soft note', 'S'),
+            ('「好きだから、全部あげたい」',    'Suki dakara, zenbu agetai',   'she sings with quiet conviction, chin lifting slightly', 'S'),
+            ('「感じてる、あなたを」',          'Kanjiteru, anata wo',         'she breathes the lyric into a held note, eyes closing', 'S'),
+        ]
+        _GRV_SINGING_KOREAN = [
+            ('\"그대만을… 그대만을…\"',        'geudaemaneul... geudaemaneul...', 'she sings softly, the repetition fading on the second pass', 'T'),
+            ('\"꿈속에서 너를 기다렸어\"',      'kkumsogeseo neoreul gidarysseo', 'she hums the melody first, then shapes the words quietly', 'T'),
+            ('\"제발 떠나지 마, 응?\"',         'jebal tteonaji ma, eung?',    'she sings, drawing the final syllable into a gentle upward curve', 'T'),
+            ('\"너무 보고 싶어서, 숨이 막혀\"', 'neomu bogo sipheoseo, sumi makhyeo', 'she sings barely above a whisper, hand resting at her chest', 'T'),
+            ('\"몸이 뜨거워, 네 생각에\"',      'momi tteugeouo, ne saenggake', 'she sings slowly, the words lingering', 'S'),
+            ('\"전부 줄게, 오늘 밤엔\"',        'jeonbu julge, oneul bamen',   'she sings with quiet conviction, chin tilting up', 'S'),
+            ('\"느껴져, 너를\"',               'neukkyeojyeo, neoreul',       'she breathes into the note, eyes closing briefly', 'S'),
+        ]
+        _GRV_SINGING_MANDARIN = [
+            ('\"只有你… 只有你…\"',            'zhǐ yǒu nǐ... zhǐ yǒu nǐ...', 'she sings softly, the phrase repeating and fading', 'T'),
+            ('\"在梦里等着你\"',               'zài mèng lǐ děng zhe nǐ',    'she hums the melody before shaping the words quietly', 'T'),
+            ('\"别离开我，好吗\"',              'bié líkāi wǒ, hǎo ma',       'she sings, the question trailing into a held note', 'T'),
+            ('\"想你想到睡不着\"',              'xiǎng nǐ xiǎng dào shuì bù zháo', 'she sings barely above a whisper, chin dropping slightly', 'T'),
+            ('\"身体很热，都是因为你\"',        'shēntǐ hěn rè, dōu shì yīnwèi nǐ', 'she sings slowly, each word drawn over a single quiet note', 'S'),
+            ('\"今晚把我全给你\"',              'jīn wǎn bǎ wǒ quán gěi nǐ',  'she sings with soft conviction, gaze lifting to the lens', 'S'),
+            ('\"感受着你\"',                   'gǎnshòu zhe nǐ',             'she breathes the lyric into a held note, eyes half-closing', 'S'),
+        ]
 
         # ── Dialogue instruction ──────────────────────────────────────────────
         _user_quoted_lines = re.findall(r'["\u201c\u201d]([^"\u201c\u201d]+)["\u201c\u201d]', user_input)
         has_user_dialogue = bool(_user_quoted_lines)
 
+        # Singing detection — swaps speech patterns for lyric fragments in gravure
+        _is_singing = bool(re.search(
+            r'\b(sing\w*|hum\w*|lullaby|lullabies|song|melody|croon\w*|chant\w*|serenade\w*|vocal\w*)\b',
+            _combined_input, re.IGNORECASE
+        ))
+
+        # Scene-type signals for smarter general dialogue
+        _is_tense    = bool(re.search(
+            r'\b(interrogat|confront|argument|fight|threaten|demand|accus|suspect|detective|arrest|hostage)\b',
+            _combined_input, re.IGNORECASE))
+        _is_tender   = bool(re.search(
+            r'\b(kiss|embrace|hold|comfort|cry|tears|gentle|tender|love|miss|goodbye|reunion)\b',
+            _combined_input, re.IGNORECASE))
+        _is_casual   = bool(re.search(
+            r'\b(coffee|lunch|walk|park|street|shop|office|friend|chat|laugh|joke|conversation)\b',
+            _combined_input, re.IGNORECASE))
+        _is_athletic = bool(re.search(
+            r'\b(run|sprint|train|gym|sport|fight|compete|race|climb|jump|push|lift weights)\b',
+            _combined_input, re.IGNORECASE))
+
         if not has_person:
             dialogue_instruction = ""
         elif has_user_dialogue:
-            # User supplied specific lines — always inject verbatim regardless of invent_dialogue toggle
+            # User supplied specific lines.
+            # Language-aware: if gravure or explicit language request, translate rather than
+            # deliver verbatim English — the meaning stays the same, the language changes.
+
+            # Detect gravure language first (reuse same logic as invent_dialogue branch)
+            _uq_grv_lang = None
+            # "in english" anywhere in the input overrides gravure translation entirely
+            _uq_english_override = bool(re.search(r'\bin\s+english\b', _combined_input, re.IGNORECASE))
+            if is_gravure and not _uq_english_override:
+                _uq_korean  = bool(re.search(r'\b(korean|korea)\b', _combined_input, re.IGNORECASE))
+                _uq_chinese = bool(re.search(r'\b(chinese|china|mandarin|cantonese)\b', _combined_input, re.IGNORECASE))
+                _uq_grv_lang = "Korean" if _uq_korean else "Mandarin" if _uq_chinese else "Japanese"
+                _uq_roman = (
+                    f"CRITICAL SCRIPT REQUIREMENT: You MUST write each line in full {('Korean (한국어)' if _uq_grv_lang == 'Korean' else 'Mandarin (中文)' if _uq_grv_lang == 'Mandarin' else 'Japanese (日本語)')} characters — "
+                    f"kanji, hiragana, katakana, hangul, or hanzi as appropriate. "
+                    f"Do NOT write romanisation only. Romanisation in parentheses comes AFTER the native script. "
+                    f"Example format: 「もっと近くで見て」(Motto chikaku de mite) — NOT just the romanisation alone. "
+                )
+
+            # Detect explicit general language request
+            _uq_explicit_lang_re = re.compile(
+                r'\b(?:say(?:s|ing)?|speak(?:s|ing)?|shout(?:s|ing)?|whisper(?:s|ing)?|'
+                r'mutter(?:s|ing)?|tell(?:s|ing)?|respond(?:s|ing)?|reply|replies|scream(?:s|ing)?|'
+                r'calls?|cries?|cry(?:ing)?|grunt(?:s|ing)?|breath(?:es|ing)?|utter(?:s|ing)?|'
+                r'exclaim(?:s|ing)?)\s+(?:\w+\s+){0,4}?in\s+(?:his|her|their|the)?\s*'
+                r'(?:native\s+(?:language|tongue)|mother\s+tongue|'
+                r'french|german|italian|spanish|portuguese|russian|arabic|hindi|thai|'
+                r'vietnamese|indonesian|malay|tagalog|filipino|turkish|persian|farsi|'
+                r'swedish|dutch|polish|greek|hebrew|ukrainian|czech|hungarian|romanian|'
+                r'mandarin|cantonese|japanese|korean)\b'
+                r'|\bin\s+(?:his|her|their|the)?\s*(?:native\s+(?:language|tongue)|mother\s+tongue)\b'
+                r'|\bin\s+(?:french|german|italian|spanish|portuguese|russian|arabic|hindi|thai|'
+                r'vietnamese|indonesian|malay|tagalog|filipino|turkish|persian|farsi|'
+                r'swedish|dutch|polish|greek|hebrew|ukrainian|czech|hungarian|romanian|'
+                r'mandarin|cantonese|japanese|korean)\b',
+                re.IGNORECASE,
+            )
+            _uq_lang_match = _uq_explicit_lang_re.search(_combined_input)
+            _uq_gen_lang = None
+            if _uq_lang_match and not is_gravure:
+                _uq_src = _uq_lang_match.group(0).lower()
+                _UQ_LANG_MAP = {
+                    "french": "French", "german": "German", "italian": "Italian",
+                    "spanish": "Spanish", "portuguese": "Portuguese", "russian": "Russian",
+                    "arabic": "Arabic", "hindi": "Hindi", "thai": "Thai",
+                    "vietnamese": "Vietnamese", "indonesian": "Indonesian", "malay": "Malay",
+                    "tagalog": "Filipino", "filipino": "Filipino", "turkish": "Turkish",
+                    "persian": "Persian", "farsi": "Persian", "swedish": "Swedish",
+                    "dutch": "Dutch", "polish": "Polish", "greek": "Greek",
+                    "hebrew": "Hebrew", "ukrainian": "Ukrainian", "czech": "Czech",
+                    "hungarian": "Hungarian", "romanian": "Romanian",
+                    "mandarin": "Mandarin", "cantonese": "Cantonese",
+                    "japanese": "Japanese", "korean": "Korean",
+                }
+                for key, val in _UQ_LANG_MAP.items():
+                    if key in _uq_src:
+                        _uq_gen_lang = val
+                        break
+                # "native language/tongue" with no specific language — infer from character
+                if not _uq_gen_lang and ("native" in _uq_src or "mother" in _uq_src):
+                    _uq_gen_lang = "their native language (infer from the character's nationality or ethnicity described in the scene)"
+
             _lines_formatted = "\n".join(
                 f'{i+1}. "{line.strip()}"'
                 for i, line in enumerate(_user_quoted_lines)
@@ -2466,70 +2763,399 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
                 "but the required lines above take absolute priority. "
                 if invent_dialogue else ""
             )
-            dialogue_instruction = (
-                f"\n\n[DIALOGUE INSTRUCTION — MANDATORY AND VERBATIM: "
-                f"The user has written {len(_user_quoted_lines)} specific line(s) of dialogue. "
-                f"You MUST deliver ALL of them, IN ORDER, word-for-word. "
-                f"Do NOT paraphrase, skip, or merge any line. "
-                f"Do NOT describe the effect of speaking instead of writing the actual words. "
-                f"Each line must appear in quotes in the output, "
-                f"with a physical acting direction between each line.\n"
-                f"REQUIRED LINES IN ORDER:\n{_lines_formatted}\n"
-                f"{_invent_addendum}"
-                f"Never use [DIALOGUE: ...] tags.]"
-            )
-        elif invent_dialogue:
-            if is_gravure:
-                # Detect the character's actual ethnicity from the user input or preset context
-                # to pick the right language — Korean character gets Korean, Japanese gets Japanese
-                _grv_korean  = bool(re.search(r'\b(korean|korea)\b', _combined_input, re.IGNORECASE))
-                _grv_chinese = bool(re.search(r'\b(chinese|china|mandarin)\b', _combined_input, re.IGNORECASE))
-                if _grv_korean:
-                    _grv_lang = "Korean"
-                    _grv_examples = (
-                        "'\"봐봐,\" she breathes, glancing over her shoulder.' "
-                        "or '\"좋아?\" she whispers, tilting her chin up slowly.' "
-                        "or '\"느껴져?\" — barely above silence, eyes holding the lens.'"
-                    )
-                elif _grv_chinese:
-                    _grv_lang = "Mandarin"
-                    _grv_examples = (
-                        "'\"看我,\" she murmurs, fingers trailing her collarbone.' "
-                        "or '\"好看吗?\" she asks, voice barely above a breath.' "
-                        "or '\"感觉到了吗?\" — slow and deliberate, head tilting slightly.'"
+
+            if _uq_grv_lang:
+                # Gravure — translate the user's lines into the correct language
+                _uq_script_name = (
+                    "kanji/hiragana/katakana" if _uq_grv_lang == "Japanese" else
+                    "hangul (한글)" if _uq_grv_lang == "Korean" else
+                    "hanzi (simplified Chinese characters)"
+                )
+                dialogue_instruction = (
+                    f"\n\n[DIALOGUE INSTRUCTION — MANDATORY: "
+                    f"The user has written {len(_user_quoted_lines)} line(s) of dialogue. "
+                    f"Translate ALL of them into {_uq_grv_lang} and deliver IN ORDER. "
+                    f"PRESERVE the exact meaning — do NOT substitute, paraphrase, or invent different content. "
+                    f"SCRIPT REQUIREMENT: Write in actual {_uq_script_name} characters — NOT romanisation only. "
+                    f"PARENTHESES ARE FORBIDDEN: do NOT write romanisation in parentheses next to the dialogue — "
+                    f"it renders as on-screen subtitles in the video. "
+                    f"Write the native script characters only — inline in the prose, no brackets alongside. "
+                    f"CORRECT: She whispers 「もっと近くで見て」, voice barely above silence. "
+                    f"WRONG: She whispers 「もっと近くで見て」(Motto chikaku de mite). "
+                    f"Each line is woven into a physical beat with acting direction.\n"
+                    f"LINES TO TRANSLATE IN ORDER:\n{_lines_formatted}\n"
+                    f"{_invent_addendum}"
+                    f"Never use [DIALOGUE: ...] tags.]"
+                )
+            elif _uq_gen_lang:
+                # General explicit language request — translate those specific lines
+                _NON_LATIN = ("Japanese", "Korean", "Mandarin", "Cantonese",
+                               "Arabic", "Hindi", "Thai", "Persian", "Russian",
+                               "Greek", "Hebrew", "Ukrainian")
+                if _uq_gen_lang in _NON_LATIN:
+                    _uq_script_map = {
+                        "Japanese": "kanji/hiragana/katakana",
+                        "Korean": "hangul (한글)", "Mandarin": "hanzi (simplified)",
+                        "Cantonese": "hanzi (traditional)", "Arabic": "Arabic script (العربية)",
+                        "Hindi": "Devanagari (देवनागरी)", "Thai": "Thai script (ภาษาไทย)",
+                        "Persian": "Persian script (فارسی)", "Russian": "Cyrillic (кириллица)",
+                        "Greek": "Greek script (ελληνικά)", "Hebrew": "Hebrew script (עברית)",
+                        "Ukrainian": "Cyrillic (кирилиця)",
+                    }
+                    _uq_roman_note = (
+                        f"Write in actual {_uq_script_map.get(_uq_gen_lang, _uq_gen_lang + ' script')} — NOT romanisation only. "
+                        f"Format: native script first, then romanisation in parentheses for pronunciation only. "
+                        f"The parentheses contain pronunciation ONLY — NOT an English translation. "
+                        f"Example for Russian: «Где ты?» (Gde ty?) — correct. "
+                        f"«Где ты?» (Where are you?) — WRONG, that is a translation not pronunciation. "
                     )
                 else:
-                    # Default: Japanese (preset default is Japanese/Korean/Chinese — Japanese is primary)
-                    _grv_lang = "Japanese"
-                    _grv_examples = (
-                        "'\"見て,\" she breathes, tilting her chin toward the lens.' "
-                        "or '\"感じる?\" she whispers, head dropping slightly.' "
-                        "or '\"もっと,\" — barely above silence, lips parting on the last syllable.'"
+                    _uq_roman_note = (
+                        f"Write in {_uq_gen_lang} only — no romanisation needed. "
                     )
                 dialogue_instruction = (
-                    "\n\n[DIALOGUE INSTRUCTION — MANDATORY, CANNOT BE SKIPPED: "
-                    f"She speaks ONLY in {_grv_lang}. Do NOT write English dialogue under any circumstance. "
-                    "Include two to three short spoken moments across the scene — not all at once. "
-                    "Space them across different beats so the scene breathes between them. "
-                    "Each line is intimate and minimal: a whisper, a single question, a soft exhale with a word. "
-                    "Write the line in native script with natural romanisation in parentheses immediately after. "
-                    f"Examples: {_grv_examples} "
-                    "Voice is always soft, slow, and intimate — never loud, never urgent. "
-                    "Weave each line into a physical beat — never in a static pause. "
-                    + music_sound_rule + "]"
+                    f"\n\n[DIALOGUE INSTRUCTION — MANDATORY: "
+                    f"The user has written {len(_user_quoted_lines)} line(s) of dialogue. "
+                    f"Translate ALL of them into {_uq_gen_lang} and deliver IN ORDER. "
+                    f"PRESERVE the exact meaning — do NOT substitute or invent different content. "
+                    f"{_uq_roman_note}"
+                    f"Each line is woven into a physical beat with acting direction.\n"
+                    f"LINES TO TRANSLATE IN ORDER:\n{_lines_formatted}\n"
+                    f"{_invent_addendum}"
+                    f"Never use [DIALOGUE: ...] tags.]"
                 )
             else:
+                # No language request — deliver verbatim as before
+                dialogue_instruction = (
+                    f"\n\n[DIALOGUE INSTRUCTION — MANDATORY AND VERBATIM: "
+                    f"The user has written {len(_user_quoted_lines)} specific line(s) of dialogue. "
+                    f"You MUST deliver ALL of them, IN ORDER, word-for-word. "
+                    f"Do NOT paraphrase, skip, or merge any line. "
+                    f"Do NOT describe the effect of speaking instead of writing the actual words. "
+                    f"Each line must appear in quotes in the output, "
+                    f"with a physical acting direction between each line.\n"
+                    f"REQUIRED LINES IN ORDER:\n{_lines_formatted}\n"
+                    f"{_invent_addendum}"
+                    f"Never use [DIALOGUE: ...] tags.]"
+                )
+        elif invent_dialogue:
+            if is_gravure:
+                # ── Language resolver — ethnicity/nationality → language ────────
+                # Priority: explicit language keyword > nationality > ethnicity > default (Japanese)
+                # Pools exist for Japanese/Korean/Mandarin.
+                # All other languages use LLM-generated dialogue with structural guidance.
+                def _detect_grv_language(text):
+                    t = text.lower()
+                    if re.search(r'\b(japanese|japan)\b', t):        return "Japanese"
+                    if re.search(r'\b(korean|korea)\b', t):           return "Korean"
+                    if re.search(r'\b(chinese|china|mandarin|cantonese)\b', t): return "Mandarin"
+                    if re.search(r'\b(french|france|parisian)\b', t): return "French"
+                    if re.search(r'\b(german|germany|deutsch)\b', t): return "German"
+                    if re.search(r'\b(italian|italy)\b', t):          return "Italian"
+                    if re.search(r'\b(spanish|spain|latina|mexican|colombian|argentinian)\b', t): return "Spanish"
+                    if re.search(r'\b(portuguese|portugal|brazilian)\b', t): return "Portuguese"
+                    if re.search(r'\b(russian|russia)\b', t):         return "Russian"
+                    if re.search(r'\b(arabic|arab|lebanese|moroccan|egyptian|saudi|emirati|gulf)\b', t): return "Arabic"
+                    if re.search(r'\b(hindi|indian|south asian|bengali|punjabi)\b', t): return "Hindi"
+                    if re.search(r'\b(thai|thailand)\b', t):          return "Thai"
+                    if re.search(r'\b(vietnamese|vietnam)\b', t):     return "Vietnamese"
+                    if re.search(r'\b(indonesian|indonesia|malay|malaysia)\b', t): return "Indonesian"
+                    if re.search(r'\b(tagalog|filipino|philippines)\b', t): return "Filipino"
+                    if re.search(r'\b(turkish|turkey)\b', t):         return "Turkish"
+                    if re.search(r'\b(persian|iranian|farsi|iran)\b', t): return "Persian"
+                    if re.search(r'\b(swedish|sweden)\b', t):         return "Swedish"
+                    if re.search(r'\b(dutch|netherlands|holland)\b', t): return "Dutch"
+                    if re.search(r'\b(polish|poland)\b', t):          return "Polish"
+                    if re.search(r'\b(greek|greece)\b', t):           return "Greek"
+                    if re.search(r'\b(east asian)\b', t):             return "Japanese"
+                    return "Japanese"  # gravure default
+
+                _grv_lang    = _detect_grv_language(_combined_input)
+                _has_pool    = _grv_lang in ("Japanese", "Korean", "Mandarin")
+                _speech_pool = (
+                    _GRV_LINES_JAPANESE if _grv_lang == "Japanese" else
+                    _GRV_LINES_KOREAN   if _grv_lang == "Korean"   else
+                    _GRV_LINES_MANDARIN if _grv_lang == "Mandarin"  else []
+                )
+                _sing_pool = (
+                    _GRV_SINGING_JAPANESE if _grv_lang == "Japanese" else
+                    _GRV_SINGING_KOREAN   if _grv_lang == "Korean"   else
+                    _GRV_SINGING_MANDARIN if _grv_lang == "Mandarin"  else []
+                )
+                # Script requirement — native characters inline in prose, NO parenthetical romanisation
+                _roman_note = (
+                    f"CRITICAL SCRIPT AND FORMAT REQUIREMENT: "
+                    f"Write each line in full {_grv_lang} characters "
+                    f"({'kanji/hiragana/katakana' if _grv_lang == 'Japanese' else 'hangul (한글)' if _grv_lang == 'Korean' else 'hanzi/simplified Chinese'}). "
+                    f"Do NOT write romanisation only, and do NOT put romanisation in parentheses next to the dialogue — "
+                    f"parenthetical text renders as on-screen subtitles in the video. "
+                    f"CORRECT: She whispers 「もっと近くで見て」, the syllables drawn out softly. "
+                    f"WRONG: She whispers 「もっと近くで見て」(Motto chikaku de mite). "
+                    f"Write native script characters only — no brackets, no romanisation alongside. "
+                )
+
+                # Seed-driven RNG for reproducible variety
+                _dlg_rng = random.Random(seed if seed != -1 else None)
+
+                if _is_singing:
+                    # ── Singing mode ──────────────────────────────────────────
+                    if _has_pool:
+                        _sing_tier = [l for l in _sing_pool if l[3] in ('T', 'S')] if not is_explicit else _sing_pool
+                        _sing_picked = _dlg_rng.sample(_sing_tier, min(3, len(_sing_tier)))
+                        _sing_examples = "  ".join(
+                            f"'{script} ({roman}) — {note}.'"
+                            for script, roman, note, _ in _sing_picked
+                        )
+                        _sing_example_line = (
+                            f"EXAMPLE TONE AND FORMAT (do NOT copy verbatim — invent your own lyric content): {_sing_examples} "
+                        )
+                    else:
+                        _sing_example_line = (
+                            f"EXAMPLE FORMAT: 'Tu sei tutto per me... (she sings, barely above a breath, "
+                            f"the phrase dissolving on the last syllable)' — adapt this structure to {_grv_lang}. "
+                        )
+                    dialogue_instruction = (
+                        "\n\n[VOCAL/SINGING INSTRUCTION — MANDATORY, CANNOT BE SKIPPED: "
+                        f"She sings or hums ONLY in {_grv_lang}. No English lyrics. "
+                        "Use lyric-style fragments — short melodic phrases, not full sentences of speech. "
+                        "Include THREE vocal moments: one early (establishing the melody), "
+                        "one mid (emotionally peaks), one late (fades or resolves). "
+                        "Describe HOW she sings each line — breath, volume, note shape, where the phrase dissolves. "
+                        "Lyrics should feel written for intimacy — soft, personal, slightly incomplete, "
+                        "as if she is singing to one person only. "
+                        + _roman_note
+                        + _sing_example_line
+                        + music_sound_rule + "]"
+                    )
+                else:
+                    # ── Speech mode ───────────────────────────────────────────
+                    # Tier-specific tone brief
+                    if is_explicit:
+                        _grv_tone = (
+                            "Lines range across the scene: one can be playful or teasing, "
+                            "one intimate and confessional, one direct and physically explicit. "
+                            "Explicit lines should be raw and specific — match exactly what is happening in the scene. "
+                            "Do NOT sanitise or euphemise if the scene is explicit."
+                        )
+                    elif is_sensual:
+                        _grv_tone = (
+                            "Lines span the emotional range of the scene: one playful or curious, "
+                            "one intimate and slightly vulnerable, one sensual and direct. "
+                            "Stay at the level of sensuality the scene describes — do not self-escalate."
+                        )
+                    else:
+                        _grv_tone = (
+                            "Lines are warm, intimate, and camera-aware: one playful, "
+                            "one confessional or emotionally open, one direct and present. "
+                            "Keep all content tasteful — no explicit or overtly sexual language."
+                        )
+
+                    if _has_pool:
+                        # Pool languages — use tiered examples + LLM invents third
+                        if is_explicit:
+                            _active_pool = _speech_pool
+                        elif is_sensual:
+                            _active_pool = [l for l in _speech_pool if l[3] in ('T', 'S')]
+                        else:
+                            _active_pool = [l for l in _speech_pool if l[3] == 'T']
+                        if len(_active_pool) < 3:
+                            _active_pool = [l for l in _speech_pool if l[3] in ('T', 'S')]
+                        if len(_active_pool) < 3:
+                            _active_pool = _speech_pool
+
+                        _picked = _dlg_rng.sample(_active_pool, min(2, len(_active_pool)))
+                        _grv_examples = "  ".join(
+                            f"'{script} ({roman}), {note}.'"
+                            for script, roman, note, _ in _picked
+                        )
+                        _example_line = (
+                            "ANCHOR EXAMPLES — use these two as style/register reference, "
+                            f"then INVENT a third line yourself in the same language and register: {_grv_examples} "
+                        )
+                    else:
+                        # Non-pool language — LLM writes all three lines itself
+                        # Give it a structural example in the target language style
+                        _example_line = (
+                            f"INVENT all three lines yourself in natural, fluent {_grv_lang}. "
+                            "Lines must sound authentic and idiomatic — not translated from English. "
+                            "Use vocabulary and phrasing that fits the intimate, camera-aware register of this scene. "
+                        )
+
+                    dialogue_instruction = (
+                        "\n\n[DIALOGUE INSTRUCTION — MANDATORY, CANNOT BE SKIPPED: "
+                        f"She speaks ONLY in {_grv_lang}. Do NOT write English dialogue. "
+                        "Include THREE spoken moments — one early in the scene, one mid, one late. "
+                        "Each is a COMPLETE PHRASE or short sentence — never a single word. "
+                        + _grv_tone + " "
+                        + _roman_note
+                        + "Weave each line into a physical beat — a movement, a shift of weight, a held gaze. "
+                        "Voice always soft and intimate — never loud or rushed. "
+                        + _example_line
+                        + music_sound_rule + "]"
+                    )
+            else:
+                # ── General scene ─────────────────────────────────────────────
+                # Detect if user explicitly requested a specific language for dialogue.
+                # Only fires on direct user instruction — "in French", "in German",
+                # "in her native language/tongue", "says in Spanish" etc.
+                # Does NOT fire just because a nationality is mentioned.
+                _EXPLICIT_LANG_REQUEST_RE = re.compile(
+                    r'\b(?:say(?:s|ing)?|speak(?:s|ing)?|shout(?:s|ing)?|whisper(?:s|ing)?|'
+                    r'mutter(?:s|ing)?|tell(?:s|ing)?|respond(?:s|ing)?|reply|replies|scream(?:s|ing)?|'
+                    r'calls?|cries?|cry(?:ing)?|grunt(?:s|ing)?|breath(?:es|ing)?|utter(?:s|ing)?|'
+                    r'exclaim(?:s|ing)?)\s+(?:\w+\s+){0,4}?in\s+(?:his|her|their|the)?\s*'
+                    r'(?:native\s+(?:language|tongue)|mother\s+tongue|'
+                    r'french|german|italian|spanish|portuguese|russian|arabic|hindi|thai|'
+                    r'vietnamese|indonesian|malay|tagalog|filipino|turkish|persian|farsi|'
+                    r'swedish|dutch|polish|greek|hebrew|ukrainian|czech|hungarian|romanian|'
+                    r'mandarin|cantonese|japanese|korean)\b'
+                    r'|'
+                    r'\bin\s+(?:his|her|their|the)?\s*(?:native\s+(?:language|tongue)|mother\s+tongue)\b',
+                    re.IGNORECASE,
+                )
+                _lang_request_match = _EXPLICIT_LANG_REQUEST_RE.search(_combined_input)
+
+                # Also detect a bare "in [language]" phrasing close to a dialogue verb
+                # e.g. "an angry German man says in German" or "she whispers in French"
+                _BARE_LANG_RE = re.compile(
+                    r'\bin\s+(french|german|italian|spanish|portuguese|russian|arabic|hindi|thai|'
+                    r'vietnamese|indonesian|malay|tagalog|filipino|turkish|persian|farsi|'
+                    r'swedish|dutch|polish|greek|hebrew|ukrainian|czech|hungarian|romanian|'
+                    r'mandarin|cantonese|japanese|korean)\b',
+                    re.IGNORECASE,
+                )
+                _bare_lang_match = _BARE_LANG_RE.search(_combined_input)
+
+                # Resolve requested language name
+                _requested_lang = None
+                if _lang_request_match or _bare_lang_match:
+                    _src = (_lang_request_match or _bare_lang_match).group(0).lower()
+                    _LANG_NAME_MAP = {
+                        "french": "French", "german": "German", "italian": "Italian",
+                        "spanish": "Spanish", "portuguese": "Portuguese", "russian": "Russian",
+                        "arabic": "Arabic", "hindi": "Hindi", "thai": "Thai",
+                        "vietnamese": "Vietnamese", "indonesian": "Indonesian", "malay": "Malay",
+                        "tagalog": "Filipino", "filipino": "Filipino", "turkish": "Turkish",
+                        "persian": "Persian", "farsi": "Persian", "swedish": "Swedish",
+                        "dutch": "Dutch", "polish": "Polish", "greek": "Greek",
+                        "hebrew": "Hebrew", "ukrainian": "Ukrainian", "czech": "Czech",
+                        "hungarian": "Hungarian", "romanian": "Romanian",
+                        "mandarin": "Mandarin", "cantonese": "Cantonese",
+                        "japanese": "Japanese", "korean": "Korean",
+                    }
+                    for key, val in _LANG_NAME_MAP.items():
+                        if key in _src:
+                            _requested_lang = val
+                            break
+                    # "native language/tongue" — no specific language named, infer from character
+                    if not _requested_lang and ("native" in _src or "mother" in _src):
+                        _requested_lang = "_infer"
+
+                # Romanisation note for non-Latin script languages
+                _NON_LATIN_SCRIPTS = {
+                    "Japanese":  "Japanese characters (kanji/hiragana/katakana)",
+                    "Korean":    "Korean hangul characters (한글)",
+                    "Mandarin":  "Chinese characters (hanzi/simplified)",
+                    "Cantonese": "Chinese characters (traditional/simplified)",
+                    "Arabic":    "Arabic script (العربية)",
+                    "Hindi":     "Devanagari script (देवनागरी)",
+                    "Thai":      "Thai script (ภาษาไทย)",
+                    "Persian":   "Persian/Farsi script (فارسی)",
+                    "Russian":   "Cyrillic script (кириллица)",
+                    "Greek":     "Greek script (ελληνικά)",
+                    "Hebrew":    "Hebrew script (עברית)",
+                    "Ukrainian": "Cyrillic script (кирилиця)",
+                }
+                _gen_roman_note = ""
+                if _requested_lang in _NON_LATIN_SCRIPTS:
+                    _script_name = _NON_LATIN_SCRIPTS[_requested_lang]
+                    _gen_roman_note = (
+                        f"CRITICAL: Write the dialogue in actual {_script_name} — NOT romanisation only. "
+                        f"Do NOT put romanisation in parentheses next to the dialogue — parenthetical text "
+                        f"renders as on-screen subtitles in the video. Write native script characters only, "
+                        f"inline in the prose with no brackets alongside. "
+                        f"CORRECT: She whispers «Где ты?», voice low and urgent. "
+                        f"WRONG: She whispers «Где ты?» (Gde ty?). "
+                    )
+                elif _requested_lang and _requested_lang != "_infer":
+                    _gen_roman_note = (
+                        f"Write the {_requested_lang} dialogue in the native language only — "
+                        f"no romanisation needed. "
+                    )
+                elif _requested_lang == "_infer":
+                    _gen_roman_note = (
+                        "If the character's native language uses a non-Latin script, write native script "
+                        "characters only — no romanisation in parentheses as this renders as on-screen subtitles. "
+                        "If it uses a Latin script, write the native language only with no romanisation. "
+                    )
+
+                # Language addendum — only appended when user explicitly requested it
+                if _requested_lang == "_infer":
+                    _lang_addendum = (
+                        "\nLANGUAGE NOTE: The user has asked for dialogue in the character's native language. "
+                        "Identify the character's nationality or ethnicity from the scene description "
+                        "and write the relevant dialogue in that language. "
+                        "If no clear nationality is stated, use the language most consistent with the scene's context. "
+                        + _gen_roman_note
+                    )
+                elif _requested_lang:
+                    _lang_addendum = (
+                        f"\nLANGUAGE NOTE: The user has asked for dialogue in {_requested_lang}. "
+                        f"Write those specific lines in {_requested_lang} exactly as requested. "
+                        f"Other dialogue in the scene (if any) can remain in English. "
+                        + _gen_roman_note
+                    )
+                else:
+                    _lang_addendum = ""
+
+                # Scene-type tone brief
+                if _is_tense:
+                    _dlg_tone = (
+                        "Dialogue is clipped and charged — short sentences, pressure in every word. "
+                        "Characters don't finish each other's sentences. Silences between lines are loaded. "
+                        "Example register: '\"Sit down,\" he says, voice flat.' "
+                        "or '\"I didn't say you could leave.\" He steps closer.'")
+                elif _is_tender:
+                    _dlg_tone = (
+                        "Dialogue is soft, unguarded, and emotionally specific — the kind of thing "
+                        "people only say when they mean it. No performance, no deflection. "
+                        "Example register: '\"I thought I'd lost you,\" she says, barely audible.' "
+                        "or '\"You don't have to explain,\" he murmurs, hand finding her shoulder.'")
+                elif _is_athletic:
+                    _dlg_tone = (
+                        "Dialogue is sparse and physical — short commands, exertion sounds, brief focus cues. "
+                        "Words land between breaths. "
+                        "Example register: '\"Again,\" he says, jaw tight.' "
+                        "or '\"Come on,\" she mutters through clenched teeth, pushing through the burn.'")
+                elif is_explicit or is_sensual:
+                    _dlg_tone = (
+                        "Dialogue is direct and physical, grounded in what is happening in the scene. "
+                        "Lines are short, urgent, or breathless — no literary flourish. "
+                        "Example register: '\"Don\\'t stop,\" she breathes, fingers tightening.' "
+                        "or '\"Look at me,\" he says quietly, slowing his pace deliberately.'")
+                elif _is_casual:
+                    _dlg_tone = (
+                        "Dialogue sounds like real conversation — unpolished, natural, with the kind of "
+                        "half-sentences and overlaps that real people use. "
+                        "Example register: '\"Sorry, I — did you want the last one?\" she asks, already reaching.' "
+                        "or '\"No, I get it,\" he says, though his expression says otherwise.'")
+                else:
+                    _dlg_tone = (
+                        "Dialogue is specific to this exact moment — what would this person actually say "
+                        "right now, in this situation, with this level of emotion? "
+                        "No generic lines. Ground every word in what is physically happening.")
+
                 dialogue_instruction = (
                     "\n\n[DIALOGUE INSTRUCTION — MANDATORY, CANNOT BE SKIPPED: "
-                    "You MUST include at least one line of spoken dialogue. "
-                    "Invent dialogue that sounds like something a real person would actually say in this exact situation. "
-                    "Write it as inline prose woven into the action, with attribution and physical delivery. "
-                    "Examples: '\"Don\\'t stop,\" she breathes, gripping the sheets.' "
-                    "'\"Are you watching me?\" her tone half-amused, half-serious.' "
-                    "If the scene is sexual or explicit, dialogue must reflect that. "
-                    "Weave it into a physical beat — never in a static pause. "
+                    "Include at least TWO lines of spoken dialogue, spaced across the scene — not dumped in one block. "
+                    "Each line is woven into a physical beat with attribution and a delivery note. "
+                    "Lines must vary in register or emotional weight — do NOT write two lines of the same tone. "
+                    "Do NOT write generic filler ('\"Wow\"', '\"OK\"', '\"Yeah\"' alone). "
+                    "Every line must reveal character, intention, or emotional state. "
+                    + _dlg_tone + " "
                     "Invented dialogue MUST be grounded in what is visibly happening — "
                     "do NOT invent backstory or context not in the user's input. "
+                    + _lang_addendum
                     + music_sound_rule + "]"
                 )
         else:
@@ -2782,8 +3408,17 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
         words = result.split()
         if len(words) > cap:
             trunc = " ".join(words[:cap])
-            best  = max((trunc.rfind(c) for c in ".!?"), default=-1)
-            result = (trunc[:best + 1] if best > int(len(trunc) * 0.5) else trunc.rstrip(",;:— ")).strip()
+            # Find the last sentence-ending punctuation in the truncated text.
+            # Require it to be past 40% of the string so we don't cut too early.
+            # If no clean sentence boundary exists, strip trailing partial clause
+            # punctuation (comma, semicolon, colon, em-dash) and close with a period.
+            best = max((trunc.rfind(c) for c in ".!?"), default=-1)
+            if best > int(len(trunc) * 0.4):
+                result = trunc[:best + 1].strip()
+            else:
+                result = trunc.rstrip(",;:— ").strip()
+                if result and result[-1] not in ".!?":
+                    result += "."
             print(f"[LTX2-Qwen] Truncated: {len(words)} → {len(result.split())} words")
 
         # ── LoRA trigger hard prepend ─────────────────────────────────────────
@@ -2795,9 +3430,22 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
             print(f"[LTX2-Qwen] LoRA triggers prepended: {triggers}")
 
         # ── Style label safety net ────────────────────────────────────────────
-        if style_label and not result.lower().startswith(style_label.split()[0].lower()):
-            result = style_label + " " + result
-            print(f"[LTX2-Qwen] Style label prepended (LLM omitted it): {style_label}")
+        if style_label:
+            # Strip a leading duplicate if the LLM already emitted the label
+            # (handles cases where the label appears twice at the start).
+            _label_lower  = style_label.lower().rstrip(". ")
+            _result_lower = result.lower().lstrip()
+            if _result_lower.startswith(_label_lower):
+                # Label present once — strip it so we can re-prepend cleanly below
+                result = result[len(style_label):].lstrip(" .,")
+                _result_lower = result.lower().lstrip()
+            # Now check if the stripped result still starts with the label (double print)
+            # and strip again if so
+            if _result_lower.startswith(_label_lower):
+                result = result[len(style_label):].lstrip(" .,")
+            # Always prepend the canonical label
+            result = style_label + " " + result.lstrip()
+            print(f"[LTX2-Qwen] Style label applied: {style_label}")
 
         # ── Negative prompt ───────────────────────────────────────────────────
         neg = _build_negative_prompt(result, user_input, is_portrait=is_portrait, style_preset=style_preset)
