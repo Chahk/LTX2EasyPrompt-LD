@@ -3,9 +3,51 @@ import os
 import json
 import random
 import time as _time
+import sys
+import subprocess
 
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
+
+# ── Transformers version check ────────────────────────────────────────────────
+# Qwen3.5 requires transformers >= 4.43.0 for full performance and correct
+# chat template support. Older versions are significantly slower and may
+# produce degraded output. Auto-upgrade if needed.
+_TRANSFORMERS_MIN = (4, 43, 0)
+_TRANSFORMERS_MIN_STR = "4.43.0"
+
+def _check_and_upgrade_transformers():
+    try:
+        import transformers as _tf
+        _ver = tuple(int(x) for x in _tf.__version__.split(".")[:3])
+        if _ver >= _TRANSFORMERS_MIN:
+            print(f"[LTX2-Qwen] transformers {_tf.__version__} — OK")
+            return
+        print(f"[LTX2-Qwen] transformers {_tf.__version__} is outdated "
+              f"(need >= {_TRANSFORMERS_MIN_STR}). Upgrading...")
+    except ImportError:
+        print(f"[LTX2-Qwen] transformers not found. Installing...")
+
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install",
+             f"transformers>={_TRANSFORMERS_MIN_STR}",
+             "--upgrade", "--quiet"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # Force reload so the rest of the file gets the updated version
+        if "transformers" in sys.modules:
+            import importlib
+            import transformers as _tf2
+            importlib.reload(_tf2)
+        print(f"[LTX2-Qwen] transformers upgraded successfully. "
+              f"Restart ComfyUI if you encounter any issues.")
+    except Exception as e:
+        print(f"[LTX2-Qwen] WARNING: Could not upgrade transformers automatically: {e}. "
+              f"Please run: pip install transformers>={_TRANSFORMERS_MIN_STR} --upgrade")
+
+_check_and_upgrade_transformers()
 
 import torch
 import gc
