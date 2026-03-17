@@ -53,10 +53,9 @@ class LTX2VisionDescribe:
         return {
             "required": {
                 "image": ("IMAGE", {"tooltip": "Connect your starting image here. The vision model will analyse it and output a scene description for use with the Easy Prompt node."}),
-                "bypass": ("BOOLEAN", {
-                    "default": False,
-                    "tooltip": "When ON: skips the vision model entirely and returns an empty string. "
-                               "Use this to disable the Vision node from your subgraph without rewiring."
+                "🖼 use image vision?": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "When ON: runs the vision model and outputs a scene description. Turn OFF to skip the vision model and return an empty string without rewiring."
                 }),
                 "model_name": (list(MODEL_OPTIONS.keys()), {
                     "default": "Qwen2.5-VL-3B — Fast (huihui abliterated)",
@@ -77,9 +76,14 @@ class LTX2VisionDescribe:
     FUNCTION      = "describe"
     CATEGORY      = "LTX2"
 
-    def describe(self, image, bypass, model_name, offline_mode, local_path):
+    def describe(self, image, **kwargs):
+        use_image_vision = kwargs.get("🖼 use image vision?", True)
+        model_name    = kwargs.get("model_name", list(MODEL_OPTIONS.keys())[0])
+        offline_mode  = kwargs.get("offline_mode", False)
+        local_path    = kwargs.get("local_path", "")
+        bypass = not use_image_vision
         if bypass:
-            print("[VisionDescribe] Bypassed — returning empty string.")
+            print("[VisionDescribe] Vision disabled — returning empty string.")
             return ("",)
 
         global _INSTANCE
