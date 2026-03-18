@@ -8174,7 +8174,7 @@ Output ONLY the prompt. No preamble, no "Sure!", no "Here's your prompt:", no co
                     + ". These details are NOT optional suggestions — they define the world "
                     "this scene inhabits. Apply them unless the user has explicitly overridden them.]"
                 )
-                print(f"[LTX2-Qwen] Genre world: {" | ".join(_world_parts)}")
+                #print(f"[LTX2-Qwen] Genre world: {" | ".join(_world_parts)}")
 
 
         # ── Environment pool ──────────────────────────────────────────────────
